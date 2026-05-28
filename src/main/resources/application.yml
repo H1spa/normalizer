@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: mixer-normalizer
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+output:
+  url: ${OUTPUT_URL:}
