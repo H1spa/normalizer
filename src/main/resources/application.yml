@@ -1,34 +1,30 @@
-# Общие настройки Spring Boot
 server:
-  port: ${SERVER_PORT:8080}                 # порт сервиса (по умолчанию 8080)
+  port: ${SERVER_PORT:8080}
 
 spring:
   application:
     name: mixer-normalizer
 
-# Настройки Swagger
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
-# Выходной поток (куда отправлять нормализованные события)
 output:
-  url: ${OUTPUT_URL:}                       # если не задана, события пишутся в лог
+  url: ${OUTPUT_URL:}
 
-# Внешний сервис для хранения событий (outer-answer)
 outer-answer:
-  url: ${OUTER_ANSWER_URL:http://localhost:9090/api/events}   # базовый URL внешнего API
-  create-path: ${OUTER_ANSWER_CREATE_PATH:/}                  # путь для POST (создание события)
-  finish-path: ${OUTER_ANSWER_FINISH_PATH:/{id}}              # шаблон пути для PUT (завершение)
+  url: ${OUTER_ANSWER_URL:http://localhost:9090/api/events}
+  create-path: /
+  finish-path: /{id}
+  max-concurrent: ${OUTER_ANSWER_MAX_CONCURRENT:5}
 
-# Настройки периодического опроса оборудования (опционально)
 equipment:
   polling:
-    enabled: ${EQUIPMENT_POLLING_ENABLED:false}               # включить/выключить опрос
-    interval-seconds: ${EQUIPMENT_POLLING_INTERVAL:120}       # интервал в секундах (по умолч. 2 мин)
-    url: ${EQUIPMENT_POLLING_URL:}                            # URL внешнего справочника
+    enabled: ${EQUIPMENT_POLLING_ENABLED:false}
+    interval-seconds: ${EQUIPMENT_POLLING_INTERVAL:120}
+    url: ${EQUIPMENT_POLLING_URL:}
 
-# Логирование
 logging:
   level:
-    com.mixer.normalizer: ${LOGGING_LEVEL:INFO}               # уровень логирования (DEBUG, INFO, WARN, ERROR)
+    com.mixer.normalizer: ${LOGGING_LEVEL:INFO}
+    org.springframework.web: INFO

@@ -11,39 +11,80 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.Map;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 @Component
 public class OuterAnswerClient {
+
     private static final Logger log = LoggerFactory.getLogger(OuterAnswerClient.class);
-    private final RestTemplate rest = new RestTemplate();
+
+    private final RestTemplate restTemplate = new RestTemplate();
     private final OuterAnswerProperties properties;
+    private final Semaphore semaphore;
 
     public OuterAnswerClient(OuterAnswerProperties properties) {
         this.properties = properties;
+        this.semaphore = new Semaphore(properties.getMaxConcurrent(), true);
     }
 
     public String createEvent(int mixerId, String beginTime, String folder) {
-        Map<String, Object> body = Map.of(
-                "mixer_id", mixerId,
-                "begin_time", beginTime,
-                "folder", folder
-        );
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
-        String url = properties.getCreateFullUrl();
-        OuterAnswerResponse response = rest.postForObject(url, request, OuterAnswerResponse.class);
-        if (response == null || response.getId() == null) {
-            throw new RuntimeException("Outer answer did not return id");
+        acquire();
+
+        try {
+            Map<String, Object> body = Map.of(
+                    "mixer_id", mixerId,
+                    "begin_time", beginTime,
+                    "folder", folder
+            );
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            String url = properties.getCreateFullUrl();
+            OuterAnswerResponse response = restTemplate.postForObject(url, entity, OuterAnswerResponse.class);
+
+            if (response == null || response.getId() == null || response.getId().isBlank()) {
+                throw new IllegalStateException("outer-answer did not return id");
+            }
+
+            log.info("Created outer-answer event externalId={}", response.getId());
+            return response.getId();
+        } finally {
+            semaphore.release();
         }
-        log.info("Created event in outer-answer, id={}", response.getId());
-        return response.getId();
     }
 
-    public void finishEvent(String eventId, String finishTime) {
-        Map<String, String> body = Map.of("finish_time", finishTime);
-        String url = properties.getFinishFullUrl(eventId);
-        rest.put(url, body);
-        log.info("Finished event {} in outer-answer at {}", eventId, finishTime);
+    public void finishEvent(String externalEventId, String finishTime) {
+        acquire();
+
+        try {
+            Map<String, String> body = Map.of("finish_time", finishTime);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            HttpEntity<Map<String, String>> entity = new HttpEntity<>(body, headers);
+
+            String url = properties.getFinishFullUrl(externalEventId);
+            restTemplate.put(url, entity);
+
+            log.info("Finished outer-answer event externalId={} at {}", externalEventId, finishTime);
+        } finally {
+            semaphore.release();
+        }
+    }
+
+    private void acquire() {
+        try {
+            if (!semaphore.tryAcquire(30, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Too many concurrent requests to outer-answer");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting outer-answer semaphore", e);
+        }
     }
 }

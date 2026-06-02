@@ -1,22 +1,22 @@
-// Файл: src/main/java/com/mixer/normalizer/service/HttpOutputSender.java
 package com.mixer.normalizer.service;
 
 import com.mixer.normalizer.dto.OutputEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.beans.factory.annotation.Value;
 
 @Component
-@ConditionalOnProperty(name = "output.url")
+@ConditionalOnExpression("!'${output.url:}'.isBlank()")
 public class HttpOutputSender implements OutputSender {
 
     private static final Logger log = LoggerFactory.getLogger(HttpOutputSender.class);
+
     private final RestTemplate restTemplate = new RestTemplate();
     private final String outputUrl;
 
@@ -29,11 +29,13 @@ public class HttpOutputSender implements OutputSender {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
+
             HttpEntity<OutputEvent> request = new HttpEntity<>(event, headers);
             restTemplate.postForEntity(outputUrl, request, Void.class);
-            log.info("Sent to {}: {}", outputUrl, event);
+
+            log.info("Sent normalized event to {}: {}", outputUrl, event);
         } catch (Exception e) {
-            log.error("Failed to send event to {}: {}", outputUrl, event, e);
+            log.error("Failed to send normalized event to {}: {}", outputUrl, event, e);
         }
     }
 }
