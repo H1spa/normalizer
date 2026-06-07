@@ -1,11 +1,10 @@
 package com.mixer.normalizer.controller;
 
-import com.mixer.normalizer.dto.CreateEventResponse;
 import com.mixer.normalizer.dto.EquipmentRequest;
 import com.mixer.normalizer.dto.EventRequest;
-import com.mixer.normalizer.dto.FinishEventRequest;
 import com.mixer.normalizer.service.EventNormalizer;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -19,63 +18,82 @@ public class MixerController {
     }
 
     @PostMapping("/scoop")
-    public ResponseEntity<CreateEventResponse> handleScoop(@Valid @RequestBody EventRequest request) {
-        return handleBegin(request, EventNormalizer.OpType.SCOOP);
+    public ResponseEntity<Void> handleScoop(@Valid @RequestBody EventRequest request) {
+        if ("begin".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleBegin(request, EventNormalizer.OpType.SCOOP);
+        } else if ("finish".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleFinish(request, EventNormalizer.OpType.SCOOP);
+        } else {
+            throw new IllegalArgumentException("Invalid status");
+        }
+        return ResponseEntity.accepted().build();
     }
 
     @PostMapping("/table")
-    public ResponseEntity<CreateEventResponse> handleTable(@Valid @RequestBody EventRequest request) {
-        return handleBegin(request, EventNormalizer.OpType.INGOTS);
+    public ResponseEntity<Void> handleTable(@Valid @RequestBody EventRequest request) {
+        if ("begin".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleBegin(request, EventNormalizer.OpType.INGOTS);
+        } else if ("finish".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleFinish(request, EventNormalizer.OpType.INGOTS);
+        } else {
+            throw new IllegalArgumentException("Invalid status");
+        }
+        return ResponseEntity.accepted().build();
     }
 
     @PostMapping("/shovel_mixer")
-    public ResponseEntity<CreateEventResponse> handleShovelMixer(@Valid @RequestBody EventRequest request) {
-        return handleBegin(request, EventNormalizer.OpType.FLUX);
+    public ResponseEntity<Void> handleShovelMixer(@Valid @RequestBody EventRequest request) {
+        if ("begin".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleBegin(request, EventNormalizer.OpType.FLUX);
+        } else if ("finish".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleFinish(request, EventNormalizer.OpType.FLUX);
+        } else {
+            throw new IllegalArgumentException("Invalid status");
+        }
+        return ResponseEntity.accepted().build();
     }
 
     @PostMapping("/shovel_slag")
-    public ResponseEntity<CreateEventResponse> handleShovelSlag(@Valid @RequestBody EventRequest request) {
-        return handleBegin(request, EventNormalizer.OpType.DISLAY);
+    public ResponseEntity<Void> handleShovelSlag(@Valid @RequestBody EventRequest request) {
+        if ("begin".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleBegin(request, EventNormalizer.OpType.DISLAY);
+        } else if ("finish".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleFinish(request, EventNormalizer.OpType.DISLAY);
+        } else {
+            throw new IllegalArgumentException("Invalid status");
+        }
+        return ResponseEntity.accepted().build();
     }
 
     @PostMapping("/sampling")
-    public ResponseEntity<CreateEventResponse> handleSampling(@Valid @RequestBody EventRequest request) {
-        return handleBegin(request, EventNormalizer.OpType.PROBA);
-    }
-
-    @PutMapping("/event/{event_id}")
-    public ResponseEntity<Void> finishByEventId(
-            @PathVariable("event_id") String eventId,
-            @Valid @RequestBody FinishEventRequest request
-    ) {
-        normalizer.finishByEventId(eventId, request.getTimeStamp());
+    public ResponseEntity<Void> handleSampling(@Valid @RequestBody EventRequest request) {
+        if ("begin".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleBegin(request, EventNormalizer.OpType.PROBA);
+        } else if ("finish".equalsIgnoreCase(request.getStatus())) {
+            normalizer.handleFinish(request, EventNormalizer.OpType.PROBA);
+        } else {
+            throw new IllegalArgumentException("Invalid status");
+        }
         return ResponseEntity.accepted().build();
     }
 
     @PutMapping("/equipment/{mixer_id}")
-    public ResponseEntity<Void> updateEquipment(
-            @PathVariable("mixer_id") int mixerId,
-            @Valid @RequestBody EquipmentRequest request
-    ) {
-        boolean gateOpen = "OPEN".equalsIgnoreCase(request.getGate());
-        boolean tilt = Boolean.TRUE.equals(request.getTilt());
-
+    public ResponseEntity<Void> updateEquipment(@PathVariable("mixer_id") int mixerId, @Valid @RequestBody EquipmentRequest eq) {
+        boolean gateOpen = "OPEN".equalsIgnoreCase(eq.getGate());
+        boolean tilt = Boolean.TRUE.equals(eq.getTilt());
         normalizer.updateEquipment(mixerId, gateOpen, tilt);
         return ResponseEntity.ok().build();
     }
 
-    private ResponseEntity<CreateEventResponse> handleBegin(EventRequest request, EventNormalizer.OpType opType) {
-        if (!"begin".equalsIgnoreCase(request.getStatus())) {
-            throw new IllegalArgumentException("Finish must be sent to PUT /event/{event_id}");
-        }
+    @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public String handleBad(IllegalArgumentException e) {
+        return e.getMessage();
+    }
 
-        String eventId = normalizer.handleBegin(request, opType);
-
-        // Для событий, проигнорированных бизнес-правилами, например flux/dislay во время active ingots.
-        if (eventId == null) {
-            return ResponseEntity.accepted().build();
-        }
-
-        return ResponseEntity.accepted().body(new CreateEventResponse(eventId));
+    @ExceptionHandler(IllegalStateException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public String handleConflict(IllegalStateException e) {
+        return e.getMessage();
     }
 }

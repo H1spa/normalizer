@@ -19,6 +19,7 @@ outer-answer:
   max-concurrent: ${OUTER_ANSWER_MAX_CONCURRENT:5}
 
 equipment:
+  check-enabled: ${EQUIPMENT_CHECK_ENABLED:true}
   polling:
     enabled: ${EQUIPMENT_POLLING_ENABLED:false}
     interval-seconds: ${EQUIPMENT_POLLING_INTERVAL:120}
@@ -27,4 +28,3 @@ equipment:
 logging:
   level:
     com.mixer.normalizer: ${LOGGING_LEVEL:INFO}
-    org.springframework.web: INFO

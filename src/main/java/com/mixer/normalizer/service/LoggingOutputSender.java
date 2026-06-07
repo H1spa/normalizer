@@ -7,7 +7,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.stereotype.Component;
 
 @Component
-@ConditionalOnMissingBean(OutputSender.class)
+@ConditionalOnMissingBean(HttpOutputSender.class)
 public class LoggingOutputSender implements OutputSender {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingOutputSender.class);

@@ -33,9 +33,9 @@ public class OuterAnswerClient {
 
         try {
             Map<String, Object> body = Map.of(
-                    "mixer_id", mixerId,
-                    "begin_time", beginTime,
-                    "folder", folder
+                    "mixer", mixerId,
+                    "date", beginTime,
+                    "imagesFolderPath", folder
             );
 
             HttpHeaders headers = new HttpHeaders();
@@ -61,7 +61,7 @@ public class OuterAnswerClient {
         acquire();
 
         try {
-            Map<String, String> body = Map.of("finish_time", finishTime);
+            Map<String, String> body = Map.of("date", finishTime);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
