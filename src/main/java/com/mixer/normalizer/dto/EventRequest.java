@@ -4,7 +4,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 
 @Schema(description = "Входящее событие от ИИ")
@@ -17,15 +16,10 @@ public class EventRequest {
     private Integer mixerId;
 
     @NotBlank(message = "status is required")
-    @Pattern(regexp = "(?i)begin|finish", message = "status must be begin or finish")
     @Schema(description = "Статус. В новой схеме POST-эндпоинты принимают только begin", example = "begin")
     private String status;
 
     @NotBlank(message = "time_stamp is required")
-    @Pattern(
-            regexp = "\\d{4}-\\d{2}-\\d{2}_\\d{2}-\\d{2}-\\d{2}z?",
-            message = "time_stamp must match yyyy-MM-dd_HH-mm-ss or yyyy-MM-dd_HH-mm-ssz"
-    )
     @Schema(description = "Время в формате yyyy-MM-dd_HH-mm-ss, допускается суффикс z", example = "2026-05-25_10-30-00")
     @JsonProperty("time_stamp")
     private String timeStamp;

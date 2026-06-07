@@ -1,15 +1,18 @@
 package com.mixer.normalizer.service;
 
 import com.mixer.normalizer.config.OuterAnswerProperties;
-import com.mixer.normalizer.dto.OuterAnswerResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -19,24 +22,27 @@ public class OuterAnswerClient {
 
     private static final Logger log = LoggerFactory.getLogger(OuterAnswerClient.class);
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate;
     private final OuterAnswerProperties properties;
     private final Semaphore semaphore;
 
     public OuterAnswerClient(OuterAnswerProperties properties) {
         this.properties = properties;
         this.semaphore = new Semaphore(properties.getMaxConcurrent(), true);
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(properties.getConnectTimeoutMillis());
+        requestFactory.setReadTimeout(properties.getReadTimeoutMillis());
+        this.restTemplate = new RestTemplate(requestFactory);
     }
 
     public String createEvent(int mixerId, String beginTime, String folder) {
         acquire();
 
         try {
-            Map<String, Object> body = Map.of(
-                    "mixer", mixerId,
-                    "date", beginTime,
-                    "imagesFolderPath", folder
-            );
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put(properties.getMixerField(), mixerId);
+            body.put(properties.getDateField(), beginTime);
+            body.put(properties.getFolderField(), folder);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -44,14 +50,15 @@ public class OuterAnswerClient {
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
 
             String url = properties.getCreateFullUrl();
-            OuterAnswerResponse response = restTemplate.postForObject(url, entity, OuterAnswerResponse.class);
+            ResponseEntity<Object> response = restTemplate.exchange(url, httpMethod(properties.getCreateMethod()), entity, Object.class);
+            String externalId = extractExternalId(response.getBody());
 
-            if (response == null || response.getId() == null || response.getId().isBlank()) {
+            if (externalId == null || externalId.isBlank()) {
                 throw new IllegalStateException("outer-answer did not return id");
             }
 
-            log.info("Created outer-answer event externalId={}", response.getId());
-            return response.getId();
+            log.info("Created outer-answer event externalId={}", externalId);
+            return externalId;
         } finally {
             semaphore.release();
         }
@@ -61,7 +68,7 @@ public class OuterAnswerClient {
         acquire();
 
         try {
-            Map<String, String> body = Map.of("date", finishTime);
+            Map<String, String> body = Map.of(properties.getDateField(), finishTime);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -69,7 +76,7 @@ public class OuterAnswerClient {
             HttpEntity<Map<String, String>> entity = new HttpEntity<>(body, headers);
 
             String url = properties.getFinishFullUrl(externalEventId);
-            restTemplate.put(url, entity);
+            restTemplate.exchange(url, httpMethod(properties.getFinishMethod()), entity, Void.class);
 
             log.info("Finished outer-answer event externalId={} at {}", externalEventId, finishTime);
         } finally {
@@ -79,12 +86,47 @@ public class OuterAnswerClient {
 
     private void acquire() {
         try {
-            if (!semaphore.tryAcquire(30, TimeUnit.SECONDS)) {
+            if (!semaphore.tryAcquire(properties.getAcquireTimeoutSeconds(), TimeUnit.SECONDS)) {
                 throw new IllegalStateException("Too many concurrent requests to outer-answer");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting outer-answer semaphore", e);
         }
+    }
+
+    private HttpMethod httpMethod(String method) {
+        if (method == null || method.isBlank()) {
+            return HttpMethod.POST;
+        }
+        return HttpMethod.valueOf(method.trim().toUpperCase());
+    }
+
+    private String extractExternalId(Object response) {
+        for (String field : properties.getResponseIdFieldList()) {
+            Object value = extractPath(response, field);
+            if (value != null) {
+                return String.valueOf(value);
+            }
+        }
+        return null;
+    }
+
+    private Object extractPath(Object value, String path) {
+        if (value == null || path == null || path.isBlank()) {
+            return null;
+        }
+
+        Object current = value;
+        for (String part : path.split("\\.")) {
+            if (!(current instanceof Map<?, ?> map)) {
+                return null;
+            }
+            current = map.get(part);
+            if (current == null) {
+                return null;
+            }
+        }
+        return current;
     }
 }

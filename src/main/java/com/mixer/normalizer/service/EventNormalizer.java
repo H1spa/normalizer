@@ -1,5 +1,6 @@
 package com.mixer.normalizer.service;
 
+import com.mixer.normalizer.config.NormalizerProperties;
 import com.mixer.normalizer.dto.EventRequest;
 import com.mixer.normalizer.dto.OutputEvent;
 import com.mixer.normalizer.service.EquipmentStateHolder.EquipmentState;
@@ -10,7 +11,6 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
@@ -24,13 +24,14 @@ public class EventNormalizer {
     private static final Logger log = LoggerFactory.getLogger(EventNormalizer.class);
 
     // Фиксированный часовой пояс +07:00
-    private static final ZoneId FIXED_ZONE = ZoneId.of("+07:00");
-    private static final DateTimeFormatter STORAGE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
-    private static final DateTimeFormatter OUTER_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ssxx");
-
     private final OuterAnswerClient outerAnswerClient;
     private final OutputSender outputSender;
     private final EquipmentStateHolder equipmentStateHolder;
+    private final NormalizerProperties properties;
+    private final ZoneId fixedZone;
+    private final DateTimeFormatter storageFormatter;
+    private final DateTimeFormatter outerFormatter;
+    private final DateTimeFormatter inputFormatter;
 
     private final Map<Integer, MixerState> states = new ConcurrentHashMap<>();
 
@@ -39,10 +40,21 @@ public class EventNormalizer {
 
     public EventNormalizer(OuterAnswerClient outerAnswerClient,
                            OutputSender outputSender,
-                           EquipmentStateHolder equipmentStateHolder) {
+                           EquipmentStateHolder equipmentStateHolder,
+                           NormalizerProperties properties) {
         this.outerAnswerClient = outerAnswerClient;
         this.outputSender = outputSender;
         this.equipmentStateHolder = equipmentStateHolder;
+        this.properties = properties;
+        this.fixedZone = properties.fixedZoneId();
+        this.storageFormatter = properties.storageFormatter();
+        this.outerFormatter = properties.outerFormatter();
+        this.inputFormatter = new DateTimeFormatterBuilder()
+                .appendPattern(properties.getInputTimePattern())
+                .optionalStart()
+                .appendPattern(properties.getInputOffsetPattern())
+                .optionalEnd()
+                .toFormatter();
     }
 
     public enum OpType {
@@ -88,33 +100,27 @@ public class EventNormalizer {
         if (cleaned.endsWith("z")) {
             cleaned = cleaned.substring(0, cleaned.length() - 1);
         }
-        DateTimeFormatter formatter = new DateTimeFormatterBuilder()
-                .appendPattern("yyyy-MM-dd_HH-mm-ss")
-                .optionalStart()
-                .appendPattern("xx")
-                .optionalEnd()
-                .toFormatter();
-        TemporalAccessor parsed = formatter.parseBest(cleaned, ZonedDateTime::from, LocalDateTime::from);
+        TemporalAccessor parsed = inputFormatter.parseBest(cleaned, ZonedDateTime::from, LocalDateTime::from);
         ZonedDateTime zdt;
         if (parsed instanceof ZonedDateTime) {
             zdt = (ZonedDateTime) parsed;
         } else {
-            zdt = ((LocalDateTime) parsed).atZone(ZoneOffset.UTC);
+            zdt = ((LocalDateTime) parsed).atZone(properties.defaultInputZoneId());
         }
-        return zdt.withZoneSameInstant(FIXED_ZONE);
+        return zdt.withZoneSameInstant(fixedZone);
     }
 
     private String formatStorage(ZonedDateTime zdt) {
-        return zdt.format(STORAGE_FORMATTER);
+        return zdt.format(storageFormatter);
     }
 
     private String formatOuter(ZonedDateTime zdt) {
-        return zdt.format(OUTER_FORMATTER);
+        return zdt.format(outerFormatter);
     }
 
     private ZonedDateTime toZonedDateTime(String storageTime) {
-        LocalDateTime ldt = LocalDateTime.parse(storageTime, STORAGE_FORMATTER);
-        return ldt.atZone(FIXED_ZONE);
+        LocalDateTime ldt = LocalDateTime.parse(storageTime, storageFormatter);
+        return ldt.atZone(fixedZone);
     }
 
     private MixerState getState(int mixerId) {
@@ -122,15 +128,7 @@ public class EventNormalizer {
     }
 
     private void emitEvent(int mixerId, OpType type, String begin, String finish, String folder) {
-        String typeStr;
-        switch (type) {
-            case FLUX: typeStr = "flux"; break;
-            case DISLAY: typeStr = "dislay"; break;
-            case INGOTS: typeStr = "ingots"; break;
-            case SCOOP: typeStr = "scoop"; break;
-            case PROBA: typeStr = "proba"; break;
-            default: throw new IllegalArgumentException();
-        }
+        String typeStr = properties.eventTypeName(type);
         OutputEvent event = new OutputEvent(mixerId, typeStr, begin, finish, folder);
         outputSender.send(event);
         log.info("Emitted event: {}", event);
@@ -145,14 +143,22 @@ public class EventNormalizer {
         }
         MixerState state = getState(mixerId);
         synchronized (state) {
-            ZonedDateTime now = ZonedDateTime.now(FIXED_ZONE);
+            ZonedDateTime now = ZonedDateTime.now(fixedZone);
             String finishTime = formatStorage(now);
             if (tilt) {
-                interruptMixed(state, mixerId, finishTime, "mixer tilted");
-                interruptScoop(state, mixerId, finishTime, "mixer tilted");
+                if (properties.isInterruptMixedOnTilt()) {
+                    interruptMixed(state, mixerId, finishTime, properties.getTiltInterruptReason());
+                }
+                if (properties.isInterruptScoopOnTilt()) {
+                    interruptScoop(state, mixerId, finishTime, properties.getTiltInterruptReason());
+                }
             } else if (!gateOpen) {
-                interruptMixed(state, mixerId, finishTime, "gate closed");
-                interruptScoop(state, mixerId, finishTime, "gate closed");
+                if (properties.isInterruptMixedOnGateClosed()) {
+                    interruptMixed(state, mixerId, finishTime, properties.getGateClosedInterruptReason());
+                }
+                if (properties.isInterruptScoopOnGateClosed()) {
+                    interruptScoop(state, mixerId, finishTime, properties.getGateClosedInterruptReason());
+                }
             }
         }
     }
@@ -199,11 +205,10 @@ public class EventNormalizer {
             EquipmentState eq = equipmentStateHolder.getState(mixerId);
 
             if (equipmentCheckEnabled) {
-                if (opType == OpType.FLUX || opType == OpType.DISLAY || opType == OpType.SCOOP) {
+                if (properties.gateRequiredTypeSet().contains(opType)) {
                     if (!eq.gateOpen()) throw new IllegalStateException("Gate CLOSED");
                 }
-                if (eq.tilt()) throw new IllegalStateException("Cannot begin when tilted");
-                if (opType == OpType.FLUX && eq.tilt()) throw new IllegalStateException("Flux requires tilt false");
+                if (properties.isForbidBeginWhenTilted() && eq.tilt()) throw new IllegalStateException("Cannot begin when tilted");
             } else {
                 log.debug("Equipment checks disabled for mixer {}, proceeding without gate/tilt validation", mixerId);
             }
@@ -329,7 +334,7 @@ public class EventNormalizer {
                 ZonedDateTime sepZdt = toZonedDateTime(state.lastCompletedFluxFinishTime);
                 String externalId = outerAnswerClient.createEvent(mixerId, formatOuter(sepZdt), state.lastFluxFolder);
                 outerAnswerClient.finishEvent(externalId, formatOuter(sepZdt));
-                OutputEvent sepEvent = new OutputEvent(mixerId, "separation", state.lastCompletedFluxFinishTime, state.lastCompletedFluxFinishTime, state.lastFluxFolder);
+                OutputEvent sepEvent = new OutputEvent(mixerId, properties.getSeparationType(), state.lastCompletedFluxFinishTime, state.lastCompletedFluxFinishTime, state.lastFluxFolder);
                 outputSender.send(sepEvent);
                 log.info("Generated separation event, recorded in outer-answer, externalId={}", externalId);
                 state.lastCompletedFluxFinishTime = null;

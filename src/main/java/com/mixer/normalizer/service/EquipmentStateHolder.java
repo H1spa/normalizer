@@ -1,5 +1,6 @@
 package com.mixer.normalizer.service;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -9,11 +10,14 @@ import java.util.concurrent.ConcurrentHashMap;
 public class EquipmentStateHolder {
 
     private final Map<Integer, EquipmentState> states = new ConcurrentHashMap<>();
+    private final EquipmentState defaultState;
+
+    public EquipmentStateHolder(@Value("${equipment.default-gate-open:true}") boolean defaultGateOpen,
+                                @Value("${equipment.default-tilt:false}") boolean defaultTilt) {
+        this.defaultState = new EquipmentState(defaultGateOpen, defaultTilt);
+    }
 
     public record EquipmentState(boolean gateOpen, boolean tilt) {
-        public static EquipmentState defaultState() {
-            return new EquipmentState(true, false);
-        }
     }
 
     public void update(int mixerId, boolean gateOpen, boolean tilt) {
@@ -21,6 +25,10 @@ public class EquipmentStateHolder {
     }
 
     public EquipmentState getState(int mixerId) {
-        return states.getOrDefault(mixerId, EquipmentState.defaultState());
+        return states.getOrDefault(mixerId, defaultState);
+    }
+
+    public EquipmentState getDefaultState() {
+        return defaultState;
     }
 }
