@@ -55,6 +55,7 @@ public class EquipmentPoller {
     @Scheduled(fixedDelayString = "${equipment.polling.interval-seconds:120}000")
     public void pollEquipment() {
         try {
+            // ASUTP is preferred when enabled; legacy polling remains for old deployments.
             Map<Integer, EquipmentStateHolder.EquipmentState> states = asutpEquipmentClient.isEnabled()
                     ? pollAsutp()
                     : pollLegacy();
@@ -110,6 +111,7 @@ public class EquipmentPoller {
             EquipmentStateHolder.EquipmentState state = entry.getValue();
             EquipmentStateHolder.EquipmentState oldState = stateHolder.getState(mixerId);
 
+            // Avoid duplicate interrupts when polling returns the same state again.
             if (oldState.gateOpen() != state.gateOpen() || oldState.tilt() != state.tilt()) {
                 log.info("Equipment changed for mixer {}: gate={}, tilt={}", mixerId, state.gateOpen(), state.tilt());
                 normalizer.updateEquipmentFromPolling(mixerId, state.gateOpen(), state.tilt());

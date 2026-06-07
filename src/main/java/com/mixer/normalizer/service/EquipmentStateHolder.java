@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class EquipmentStateHolder {
 
+    // Concurrent reads/writes are enough here because each update replaces the whole value.
     private final Map<Integer, EquipmentState> states = new ConcurrentHashMap<>();
     private final EquipmentState defaultState;
 

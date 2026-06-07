@@ -23,7 +23,7 @@ public class EventNormalizer {
 
     private static final Logger log = LoggerFactory.getLogger(EventNormalizer.class);
 
-    // Фиксированный часовой пояс +07:00
+    // All event times are normalized to the configured production zone.
     private final OuterAnswerClient outerAnswerClient;
     private final OutputSender outputSender;
     private final EquipmentStateHolder equipmentStateHolder;
@@ -33,6 +33,7 @@ public class EventNormalizer {
     private final DateTimeFormatter outerFormatter;
     private final DateTimeFormatter inputFormatter;
 
+    // The map is concurrent; compound transitions are protected by synchronized(state).
     private final Map<Integer, MixerState> states = new ConcurrentHashMap<>();
 
     @Value("${equipment.check-enabled:true}")
@@ -94,7 +95,7 @@ public class EventNormalizer {
         String lastFluxFolder;
     }
 
-    // ---------- Парсинг и форматирование времени ----------
+    // ---------- Time parsing and formatting ----------
     private ZonedDateTime parseZoned(String timestamp) {
         String cleaned = timestamp.trim().toLowerCase();
         if (cleaned.endsWith("z")) {
@@ -105,6 +106,7 @@ public class EventNormalizer {
         if (parsed instanceof ZonedDateTime) {
             zdt = (ZonedDateTime) parsed;
         } else {
+            // Values without an offset are treated as coming from the configured input zone.
             zdt = ((LocalDateTime) parsed).atZone(properties.defaultInputZoneId());
         }
         return zdt.withZoneSameInstant(fixedZone);
@@ -134,7 +136,7 @@ public class EventNormalizer {
         log.info("Emitted event: {}", event);
     }
 
-    // ---------- Оборудование ----------
+    // ---------- Equipment ----------
     public void updateEquipment(int mixerId, boolean gateOpen, boolean tilt) {
         equipmentStateHolder.update(mixerId, gateOpen, tilt);
         if (!equipmentCheckEnabled) {
@@ -167,6 +169,7 @@ public class EventNormalizer {
         updateEquipment(mixerId, gateOpen, tilt);
     }
 
+    // Must be called under the per-mixer lock because it mutates MixerState.
     private void interruptMixed(MixerState state, int mixerId, String finishTime, String reason) {
         if (state.activeMixed != null && state.activeMixed.finishTime == null) {
             state.activeMixed.finishTime = finishTime;
@@ -184,6 +187,7 @@ public class EventNormalizer {
         }
     }
 
+    // Must be called under the per-mixer lock because it mutates MixerState.
     private void interruptScoop(MixerState state, int mixerId, String finishTime, String reason) {
         if (state.pendingScoop != null && state.pendingScoop.finishTime == null) {
             state.pendingScoop.finishTime = finishTime;
@@ -197,7 +201,7 @@ public class EventNormalizer {
         }
     }
 
-    // ---------- Обработка begin ----------
+    // ---------- Begin handling ----------
     public void handleBegin(EventRequest request, OpType opType) {
         int mixerId = request.getMixerId();
         MixerState state = getState(mixerId);
@@ -235,7 +239,7 @@ public class EventNormalizer {
         }
     }
 
-    // ---------- Обработка finish ----------
+    // ---------- Finish handling ----------
     public void handleFinish(EventRequest request, OpType opType) {
         int mixerId = request.getMixerId();
         MixerState state = getState(mixerId);
@@ -306,7 +310,7 @@ public class EventNormalizer {
             return;
         }
         if (state.activeMixed != null && state.activeMixed.finishTime == null) {
-            // Конверсия slag -> flux
+            // A dislay begin can extend the currently active flux window.
             if (state.activeMixed.type == OpType.FLUX && opType == OpType.DISLAY) {
                 ZonedDateTime existingBegin = toZonedDateTime(state.activeMixed.beginTime);
                 if (beginZdt.isBefore(existingBegin)) {
@@ -328,7 +332,7 @@ public class EventNormalizer {
             return;
         }
 
-        // Нет активной mixed операции
+        // No active mixed operation: start a new one and optionally close separation.
         if (opType == OpType.DISLAY) {
             if (state.lastCompletedFluxFinishTime != null && state.lastFluxFolder != null) {
                 ZonedDateTime sepZdt = toZonedDateTime(state.lastCompletedFluxFinishTime);

@@ -24,6 +24,7 @@ public class OuterAnswerClient {
 
     private final RestTemplate restTemplate;
     private final OuterAnswerProperties properties;
+    // Limits pressure on outer-answer and keeps callers from piling up forever.
     private final Semaphore semaphore;
 
     public OuterAnswerClient(OuterAnswerProperties properties) {
@@ -60,6 +61,7 @@ public class OuterAnswerClient {
             log.info("Created outer-answer event externalId={}", externalId);
             return externalId;
         } finally {
+            // acquire() completes before the try block, so each release matches one permit.
             semaphore.release();
         }
     }
@@ -80,6 +82,7 @@ public class OuterAnswerClient {
 
             log.info("Finished outer-answer event externalId={} at {}", externalEventId, finishTime);
         } finally {
+            // Always return the permit after the external request succeeds or fails.
             semaphore.release();
         }
     }

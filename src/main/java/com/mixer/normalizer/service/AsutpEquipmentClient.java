@@ -32,6 +32,7 @@ public class AsutpEquipmentClient {
     private final AsutpProperties properties;
     private final EquipmentStateHolder equipmentStateHolder;
 
+    // Guarded by synchronized pollStates(); do not read or write it outside that flow.
     private String dataToken;
 
     public AsutpEquipmentClient(AsutpProperties properties,
@@ -56,6 +57,7 @@ public class AsutpEquipmentClient {
         try {
             return pollWithToken(ensureDataToken());
         } catch (HttpClientErrorException.Unauthorized e) {
+            // ASUTP uses the token until 401; after that the whole auth chain is repeated.
             log.info("ASUTP token expired, refreshing");
             dataToken = null;
             return pollWithToken(ensureDataToken());
@@ -78,6 +80,7 @@ public class AsutpEquipmentClient {
     private String authenticate() {
         validateSettings();
 
+        // Step 1: url_1 returns the authorization token from domainName/password.
         Map<String, Object> authBody = new LinkedHashMap<>();
         authBody.putAll(properties.getAuthBodyMap());
         putIfPresent(authBody, properties.getDomainNameField(), properties.getDomainName());
@@ -89,6 +92,7 @@ public class AsutpEquipmentClient {
             throw new IllegalStateException("ASUTP url_1 did not return token");
         }
 
+        // Step 2: url_2 receives the first token and returns the token used for url_3.
         Map<String, Object> contextBody = new LinkedHashMap<>();
         contextBody.putAll(properties.getContextBodyMap());
         putIfPresent(contextBody, properties.getDomainNameField(), properties.getDomainName());
@@ -127,6 +131,7 @@ public class AsutpEquipmentClient {
 
     private String tokenHeaderValue(String token) {
         String scheme = properties.getTokenScheme();
+        // Basic token auth requires Authorization: Basic base64(token).
         String value = shouldBase64EncodeToken(scheme)
                 ? Base64.getEncoder().encodeToString(token.getBytes(StandardCharsets.UTF_8))
                 : token;
@@ -187,6 +192,7 @@ public class AsutpEquipmentClient {
     private Map<Integer, EquipmentState> toEquipmentStates(Map<String, Object> tagValues) {
         Map<Integer, String> gateTags = properties.getGateTagMap();
         Map<Integer, String> tiltTags = properties.getTiltTagMap();
+        // Tags are configured as mixerId=tagId, so only known mixers are produced.
         Set<Integer> mixerIds = new HashSet<>();
         mixerIds.addAll(gateTags.keySet());
         mixerIds.addAll(tiltTags.keySet());

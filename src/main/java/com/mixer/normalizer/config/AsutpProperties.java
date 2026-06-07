@@ -305,6 +305,7 @@ public class AsutpProperties {
         return parseList(tagIdFields);
     }
 
+    // Expected format: "1=gate_tag_1,2=gate_tag_2".
     private static Map<Integer, String> parseTagMap(String value) {
         Map<Integer, String> result = new LinkedHashMap<>();
         if (value == null || value.isBlank()) {
@@ -321,6 +322,7 @@ public class AsutpProperties {
         return result;
     }
 
+    // Expected format: "field=value,anotherField=anotherValue".
     private static Map<String, Object> parseBodyMap(String value) {
         Map<String, Object> result = new LinkedHashMap<>();
         if (value == null || value.isBlank()) {
@@ -337,6 +339,7 @@ public class AsutpProperties {
         return result;
     }
 
+    // Expected format: "field,data.field,anotherField".
     private static List<String> parseList(String value) {
         List<String> result = new ArrayList<>();
         if (value == null || value.isBlank()) {
