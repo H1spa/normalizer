@@ -3,25 +3,22 @@ package com.mixer.normalizer.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
-import java.util.List;
-
+/*
+ * Настройки клиента outer-answer.
+ * Внешний адрес строится из базового URL и имени операции:
+ *   begin  -> OUTER_ANSWER_URL + "/" + service
+ *   finish -> OUTER_ANSWER_URL + "/" + service + "/" + id
+ * Такой формат позволяет одному клиенту работать с flux, scoop, proba и другими service
+ * без отдельных классов под каждую операцию.
+ */
 @Component
 @ConfigurationProperties(prefix = "outer-answer")
 public class OuterAnswerProperties {
     private String url;
-    private String createPath = "/";
-    private String finishPath = "/{id}";
     private int maxConcurrent = 5;
     private int acquireTimeoutSeconds = 30;
     private int connectTimeoutMillis = 10000;
     private int readTimeoutMillis = 30000;
-    private String createMethod = "POST";
-    private String finishMethod = "PUT";
-    private String mixerField = "mixer";
-    private String dateField = "date";
-    private String folderField = "imagesFolderPath";
-    private String responseIdFields = "id,event_id,eventId,data.id";
 
     public String getUrl() {
         return url;
@@ -29,22 +26,6 @@ public class OuterAnswerProperties {
 
     public void setUrl(String url) {
         this.url = trimTrailingSlash(url);
-    }
-
-    public String getCreatePath() {
-        return createPath;
-    }
-
-    public void setCreatePath(String createPath) {
-        this.createPath = normalizePath(createPath);
-    }
-
-    public String getFinishPath() {
-        return finishPath;
-    }
-
-    public void setFinishPath(String finishPath) {
-        this.finishPath = normalizePath(finishPath);
     }
 
     public int getMaxConcurrent() {
@@ -82,70 +63,17 @@ public class OuterAnswerProperties {
         this.readTimeoutMillis = readTimeoutMillis;
     }
 
-    public String getCreateMethod() {
-        return createMethod;
+    // Полный URL создания записи: base URL + имя операции, например ".../flux".
+    public String getCreateFullUrl(String service) {
+        return join(url, normalizeService(service));
     }
 
-    public void setCreateMethod(String createMethod) {
-        this.createMethod = createMethod;
+    // Полный URL завершения записи: base URL + имя операции + id, например ".../flux/abc-123".
+    public String getFinishFullUrl(String service, String externalEventId) {
+        return join(url, normalizeService(service) + "/" + normalizeService(externalEventId));
     }
 
-    public String getFinishMethod() {
-        return finishMethod;
-    }
-
-    public void setFinishMethod(String finishMethod) {
-        this.finishMethod = finishMethod;
-    }
-
-    public String getMixerField() {
-        return mixerField;
-    }
-
-    public void setMixerField(String mixerField) {
-        this.mixerField = mixerField;
-    }
-
-    public String getDateField() {
-        return dateField;
-    }
-
-    public void setDateField(String dateField) {
-        this.dateField = dateField;
-    }
-
-    public String getFolderField() {
-        return folderField;
-    }
-
-    public void setFolderField(String folderField) {
-        this.folderField = folderField;
-    }
-
-    public String getResponseIdFields() {
-        return responseIdFields;
-    }
-
-    public void setResponseIdFields(String responseIdFields) {
-        this.responseIdFields = responseIdFields;
-    }
-
-    public List<String> getResponseIdFieldList() {
-        return parseList(responseIdFields);
-    }
-
-    public String getCreateFullUrl() {
-        return join(url, createPath);
-    }
-
-    public String getFinishFullUrl(String externalEventId) {
-        return join(url, finishPath
-                .replace("{id}", externalEventId)
-                .replace("{eventId}", externalEventId)
-                .replace(":id", externalEventId)
-                .replace(":eventId", externalEventId));
-    }
-
+    // Убирает лишние слеши в конце базового URL, чтобы склейка путей была стабильной.
     private static String trimTrailingSlash(String value) {
         if (value == null) {
             return null;
@@ -156,34 +84,33 @@ public class OuterAnswerProperties {
         return value;
     }
 
-    private static String normalizePath(String path) {
-        if (path == null || path.isBlank()) {
-            return "/";
+    /*
+     * Имя service и id берутся из бизнес-логики/ответа внешнего сервиса.
+     * Убираем крайние слеши, чтобы не получить случайный двойной "//" в URL.
+     */
+    private static String normalizeService(String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException("outer-answer service/id is empty");
         }
-        return path.startsWith("/") ? path : "/" + path;
+        String result = value.trim();
+        while (result.startsWith("/")) {
+            result = result.substring(1);
+        }
+        while (result.endsWith("/")) {
+            result = result.substring(0, result.length() - 1);
+        }
+        if (result.isBlank()) {
+            throw new IllegalStateException("outer-answer service/id is empty");
+        }
+        return result;
     }
 
+    // Склеивает базовый URL и путь, предварительно проверяя обязательный base URL.
     private static String join(String baseUrl, String path) {
         if (baseUrl == null || baseUrl.isBlank()) {
             throw new IllegalStateException("outer-answer.url is empty");
         }
         String normalizedBase = trimTrailingSlash(baseUrl);
-        String normalizedPath = normalizePath(path);
-        return normalizedBase + normalizedPath;
-    }
-
-    private static List<String> parseList(String value) {
-        List<String> result = new ArrayList<>();
-        if (value == null || value.isBlank()) {
-            return result;
-        }
-
-        for (String part : value.split(",")) {
-            String item = part.trim();
-            if (!item.isBlank()) {
-                result.add(item);
-            }
-        }
-        return result;
+        return normalizedBase + "/" + path;
     }
 }

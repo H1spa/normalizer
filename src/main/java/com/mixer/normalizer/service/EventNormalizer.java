@@ -2,7 +2,6 @@ package com.mixer.normalizer.service;
 
 import com.mixer.normalizer.config.NormalizerProperties;
 import com.mixer.normalizer.dto.EventRequest;
-import com.mixer.normalizer.dto.OutputEvent;
 import com.mixer.normalizer.service.EquipmentStateHolder.EquipmentState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,113 +9,165 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeFormatterBuilder;
-import java.time.temporal.TemporalAccessor;
+import java.time.format.DateTimeParseException;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class EventNormalizer {
 
     private static final Logger log = LoggerFactory.getLogger(EventNormalizer.class);
+    private static final String TILT_REASON = "mixer tilted";
+    private static final String GATE_CLOSED_REASON = "gate closed";
 
-    // All event times are normalized to the configured production zone.
+    /*
+     * EventNormalizer - центральная машина состояний.
+     * Если смотреть глазами разработчика из другого языка, это объект, который держит
+     * несколько потокобезопасных словарей в памяти и на каждый begin/finish решает:
+     * можно ли принять событие, какой внешний service вызвать и что сохранить до finish.
+     */
     private final OuterAnswerClient outerAnswerClient;
-    private final OutputSender outputSender;
     private final EquipmentStateHolder equipmentStateHolder;
     private final NormalizerProperties properties;
     private final ZoneId fixedZone;
     private final DateTimeFormatter storageFormatter;
     private final DateTimeFormatter outerFormatter;
-    private final DateTimeFormatter inputFormatter;
+    private final DateTimeFormatter inputLocalFormatter;
+    private final List<DateTimeFormatter> inputOffsetFormatters;
+    private final Set<OpType> gateRequiredTypes;
 
-    // The map is concurrent; compound transitions are protected by synchronized(state).
+    /*
+     * ConcurrentHashMap разрешает параллельную работу разных mixer_id.
+     * Внутри одного MixerState дополнительно используется synchronized(state),
+     * чтобы два события одного миксера не перемешали active operation и external id.
+     */
     private final Map<Integer, MixerState> states = new ConcurrentHashMap<>();
 
     @Value("${equipment.check-enabled:true}")
     private boolean equipmentCheckEnabled;
 
     public EventNormalizer(OuterAnswerClient outerAnswerClient,
-                           OutputSender outputSender,
                            EquipmentStateHolder equipmentStateHolder,
                            NormalizerProperties properties) {
         this.outerAnswerClient = outerAnswerClient;
-        this.outputSender = outputSender;
         this.equipmentStateHolder = equipmentStateHolder;
         this.properties = properties;
         this.fixedZone = properties.fixedZoneId();
         this.storageFormatter = properties.storageFormatter();
         this.outerFormatter = properties.outerFormatter();
-        this.inputFormatter = new DateTimeFormatterBuilder()
-                .appendPattern(properties.getInputTimePattern())
-                .optionalStart()
-                .appendPattern(properties.getInputOffsetPattern())
-                .optionalEnd()
-                .toFormatter();
+        this.inputLocalFormatter = DateTimeFormatter.ofPattern(properties.getInputTimePattern());
+        this.inputOffsetFormatters = List.of(
+                DateTimeFormatter.ofPattern(properties.getInputTimePattern() + properties.getInputOffsetPattern()),
+                DateTimeFormatter.ofPattern(properties.getInputTimePattern() + "XX"),
+                DateTimeFormatter.ofPattern(properties.getInputTimePattern() + "XXX")
+        );
+        this.gateRequiredTypes = properties.gateRequiredTypeSet();
     }
 
     public enum OpType {
-        INGOTS, FLUX, DISLAY, SCOOP, PROBA
+        INGOTS, FLUX, DISLAG, SCOOP, PROBA
     }
 
+    /*
+     * ActiveOperation - это "незакрытая" операция.
+     * Begin уже пришел, внешний сервис уже создал запись и вернул id,
+     * но finish еще не пришел. Поэтому мы держим в памяти beginTime, folder и externalId,
+     * чтобы позже закрыть именно ту запись, которую открыли на begin.
+     */
     private static class ActiveOperation {
         String beginTime;
         String folder;
-        String finishTime;
         String externalId;
+
         ActiveOperation(String beginTime, String folder) {
             this.beginTime = beginTime;
             this.folder = folder;
         }
     }
 
-    private static class MixedOperation {
+    /*
+     * MixedOperation отличается только тем, что один слот activeMixed используется
+     * для flux и dislag. Это нужно для строгой цепочки flux -> separation -> dislag.
+     */
+    private static class MixedOperation extends ActiveOperation {
         OpType type;
-        String beginTime;
-        String folder;
-        String finishTime;
-        String externalId;
+
         MixedOperation(OpType type, String beginTime, String folder) {
+            super(beginTime, folder);
             this.type = type;
-            this.beginTime = beginTime;
-            this.folder = folder;
         }
     }
 
+    /*
+     * MixerState - вся оперативная память по одному миксеру.
+     * Это состояние живет только внутри процесса: если приложение перезапустить,
+     * активные операции начнутся с чистого состояния. Такой подход быстрый и простой,
+     * но он означает, что незавершенные begin/finish не переживают рестарт сервиса.
+     */
     private static class MixerState {
         MixedOperation activeMixed;
         ActiveOperation activeIngots;
-        ActiveOperation pendingScoop;
-        ActiveOperation pendingProba;
+        ActiveOperation activeScoop;
+        ActiveOperation activeProba;
         String lastCompletedFluxFinishTime;
         String lastFluxFolder;
     }
 
-    // ---------- Time parsing and formatting ----------
+    // ---------- Время ----------
+
     private ZonedDateTime parseZoned(String timestamp) {
-        String cleaned = timestamp.trim().toLowerCase();
-        if (cleaned.endsWith("z")) {
-            cleaned = cleaned.substring(0, cleaned.length() - 1);
+        if (timestamp == null || timestamp.isBlank()) {
+            throw new IllegalArgumentException("time_stamp is required");
         }
-        TemporalAccessor parsed = inputFormatter.parseBest(cleaned, ZonedDateTime::from, LocalDateTime::from);
-        ZonedDateTime zdt;
-        if (parsed instanceof ZonedDateTime) {
-            zdt = (ZonedDateTime) parsed;
-        } else {
-            // Values without an offset are treated as coming from the configured input zone.
-            zdt = ((LocalDateTime) parsed).atZone(properties.defaultInputZoneId());
+
+        /*
+         * Время приводим к одной зоне сразу, до любых проверок и сравнений.
+         * Так begin/finish можно сравнивать между собой без путаницы часовых поясов.
+         * Если во входе есть Z/UTC/+0300/+03:00, переводим реальный момент времени в +0700.
+         * Если смещения нет, считаем строку временем входной зоны normalizer.default-input-zone.
+         */
+        String cleaned = normalizeUtcSuffix(timestamp.trim());
+        for (DateTimeFormatter formatter : inputOffsetFormatters) {
+            try {
+                return OffsetDateTime.parse(cleaned, formatter).atZoneSameInstant(fixedZone);
+            } catch (DateTimeParseException ignored) {
+                // Пробуем следующий разрешенный формат смещения.
+            }
         }
-        return zdt.withZoneSameInstant(fixedZone);
+
+        try {
+            LocalDateTime localDateTime = LocalDateTime.parse(cleaned, inputLocalFormatter);
+            return localDateTime.atZone(properties.defaultInputZoneId()).withZoneSameInstant(fixedZone);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Invalid time_stamp format: " + timestamp, e);
+        }
+    }
+
+    private String normalizeUtcSuffix(String value) {
+        String upper = value.toUpperCase(Locale.ROOT);
+        if (upper.endsWith("UTC")) {
+            return value.substring(0, value.length() - 3).trim() + "Z";
+        }
+        return value;
     }
 
     private String formatStorage(ZonedDateTime zdt) {
+        /*
+         * Внутри храним уже приведенное к +0700 время без offset в строке.
+         * Зона не теряется: при обратном чтении toZonedDateTime всегда приклеивает fixedZone.
+         */
         return zdt.format(storageFormatter);
     }
 
     private String formatOuter(ZonedDateTime zdt) {
+        // Во внешние сервисы всегда уходит единый формат: yyyy-MM-dd_HH-mm-ss+0700.
         return zdt.format(outerFormatter);
     }
 
@@ -125,329 +176,404 @@ public class EventNormalizer {
         return ldt.atZone(fixedZone);
     }
 
+    // ---------- Общие помощники ----------
+
     private MixerState getState(int mixerId) {
         return states.computeIfAbsent(mixerId, id -> new MixerState());
     }
 
-    private void emitEvent(int mixerId, OpType type, String begin, String finish, String folder) {
-        String typeStr = properties.eventTypeName(type);
-        OutputEvent event = new OutputEvent(mixerId, typeStr, begin, finish, folder);
-        outputSender.send(event);
-        log.info("Emitted event: {}", event);
+    private boolean hasActiveMixed(MixerState state) {
+        return state.activeMixed != null;
     }
 
-    // ---------- Equipment ----------
-    public void updateEquipment(int mixerId, boolean gateOpen, boolean tilt) {
-        equipmentStateHolder.update(mixerId, gateOpen, tilt);
+    private boolean hasActiveIngots(MixerState state) {
+        return state.activeIngots != null;
+    }
+
+    private String createExternal(OpType type, int mixerId, ZonedDateTime beginZdt, String folder) {
+        String service = properties.eventTypeName(type);
+        return outerAnswerClient.createEvent(service, mixerId, formatOuter(beginZdt), folder);
+    }
+
+    private void finishExternal(OpType type, String externalId, ZonedDateTime finishZdt) {
+        if (externalId == null || externalId.isBlank()) {
+            throw new IllegalStateException("External id is missing for " + properties.eventTypeName(type));
+        }
+        String service = properties.eventTypeName(type);
+        outerAnswerClient.finishEvent(service, externalId, formatOuter(finishZdt));
+    }
+
+    private void ensureFinishNotBeforeBegin(String beginTime, ZonedDateTime finishZdt) {
+        ZonedDateTime beginZdt = toZonedDateTime(beginTime);
+        if (finishZdt.isBefore(beginZdt)) {
+            throw new IllegalArgumentException("finish time is before begin time");
+        }
+    }
+
+    private void mergeEarlierBegin(ActiveOperation operation, String timeStr, String folder, ZonedDateTime beginZdt) {
+        /*
+         * Повторный begin той же активной операции не делает второй POST во внешний сервис.
+         * Если время раньше текущего begin, в памяти оставляем минимальное время,
+         * Это защищает от повторных или чуть переупорядоченных сообщений:
+         * внешний POST уже был, а внутри операции сохраняется самое раннее начало.
+         */
+        ZonedDateTime existingBegin = toZonedDateTime(operation.beginTime);
+        if (beginZdt.isBefore(existingBegin)) {
+            operation.beginTime = timeStr;
+            operation.folder = folder;
+            log.info("Updated active begin to earlier {}", timeStr);
+        } else {
+            log.info("Duplicate/extra begin ignored, external POST is not repeated");
+        }
+    }
+
+    private void validateEquipmentForBegin(int mixerId, OpType opType) {
         if (!equipmentCheckEnabled) {
-            log.debug("Equipment checks disabled, skipping interrupt for mixer {}", mixerId);
+            log.debug("Equipment checks disabled for mixer {}", mixerId);
             return;
         }
-        MixerState state = getState(mixerId);
+
+        EquipmentState eq = equipmentStateHolder.getState(mixerId);
+        if (eq.tilt()) {
+            log.warn("Rejected begin {} for mixer {}: mixer tilted", opType, mixerId);
+            throw new IllegalStateException("Cannot begin when tilted");
+        }
+        if (gateRequiredTypes.contains(opType) && !eq.gateOpen()) {
+            log.warn("Rejected begin {} for mixer {}: gate closed", opType, mixerId);
+            throw new IllegalStateException("Gate CLOSED");
+        }
+    }
+
+    // ---------- Оборудование ----------
+
+    public void updateEquipment(int mixerId, boolean gateOpen, boolean tilt) {
+        /*
+         * Состояние оборудования всегда сохраняется в локальный кэш:
+         * следующие begin будут проверяться уже по этому значению.
+         */
+        equipmentStateHolder.update(mixerId, gateOpen, tilt);
+        if (!equipmentCheckEnabled) {
+            return;
+        }
+
+        MixerState state = states.get(mixerId);
+        if (state == null) {
+            return;
+        }
+
         synchronized (state) {
             ZonedDateTime now = ZonedDateTime.now(fixedZone);
             String finishTime = formatStorage(now);
             if (tilt) {
-                if (properties.isInterruptMixedOnTilt()) {
-                    interruptMixed(state, mixerId, finishTime, properties.getTiltInterruptReason());
-                }
-                if (properties.isInterruptScoopOnTilt()) {
-                    interruptScoop(state, mixerId, finishTime, properties.getTiltInterruptReason());
-                }
+                /*
+                 * Наклон делает дальнейшее выполнение операции небезопасным.
+                 * Поэтому закрываем текущим временем все активные операции миксера,
+                 * даже те, которым не нужна открытая шторка.
+                 */
+                interruptMixed(state, mixerId, finishTime, TILT_REASON);
+                interruptSimple(state, mixerId, OpType.INGOTS, state.activeIngots, finishTime, TILT_REASON);
+                state.activeIngots = null;
+                interruptSimple(state, mixerId, OpType.SCOOP, state.activeScoop, finishTime, TILT_REASON);
+                state.activeScoop = null;
+                interruptSimple(state, mixerId, OpType.PROBA, state.activeProba, finishTime, TILT_REASON);
+                state.activeProba = null;
             } else if (!gateOpen) {
-                if (properties.isInterruptMixedOnGateClosed()) {
-                    interruptMixed(state, mixerId, finishTime, properties.getGateClosedInterruptReason());
+                /*
+                 * Закрытая шторка опасна только для операций, которые физически
+                 * завязаны на открытую шторку: flux, dislag и scoop.
+                 * Ingots/proba продолжают жить, потому что их запуск не зависит от шторки.
+                 */
+                if (state.activeMixed != null && gateRequiredTypes.contains(state.activeMixed.type)) {
+                    interruptMixed(state, mixerId, finishTime, GATE_CLOSED_REASON);
                 }
-                if (properties.isInterruptScoopOnGateClosed()) {
-                    interruptScoop(state, mixerId, finishTime, properties.getGateClosedInterruptReason());
-                }
+                interruptSimple(state, mixerId, OpType.SCOOP, state.activeScoop, finishTime, GATE_CLOSED_REASON);
+                state.activeScoop = null;
             }
         }
     }
 
     public void updateEquipmentFromPolling(int mixerId, boolean gateOpen, boolean tilt) {
+        // Polling АСУ ТП и ручной endpoint оборудования используют одну и ту же логику обновления.
         updateEquipment(mixerId, gateOpen, tilt);
     }
 
-    // Must be called under the per-mixer lock because it mutates MixerState.
     private void interruptMixed(MixerState state, int mixerId, String finishTime, String reason) {
-        if (state.activeMixed != null && state.activeMixed.finishTime == null) {
-            state.activeMixed.finishTime = finishTime;
-            if (state.activeMixed.externalId != null) {
-                ZonedDateTime finishZdt = toZonedDateTime(finishTime);
-                outerAnswerClient.finishEvent(state.activeMixed.externalId, formatOuter(finishZdt));
-            }
-            emitEvent(mixerId, state.activeMixed.type, state.activeMixed.beginTime, finishTime, state.activeMixed.folder);
-            if (state.activeMixed.type == OpType.FLUX) {
-                state.lastCompletedFluxFinishTime = finishTime;
-                state.lastFluxFolder = state.activeMixed.folder;
-            }
-            state.activeMixed = null;
-            log.info("Interrupted mixed due to {}", reason);
-        }
-    }
-
-    // Must be called under the per-mixer lock because it mutates MixerState.
-    private void interruptScoop(MixerState state, int mixerId, String finishTime, String reason) {
-        if (state.pendingScoop != null && state.pendingScoop.finishTime == null) {
-            state.pendingScoop.finishTime = finishTime;
-            if (state.pendingScoop.externalId != null) {
-                ZonedDateTime finishZdt = toZonedDateTime(finishTime);
-                outerAnswerClient.finishEvent(state.pendingScoop.externalId, formatOuter(finishZdt));
-            }
-            emitEvent(mixerId, OpType.SCOOP, state.pendingScoop.beginTime, finishTime, state.pendingScoop.folder);
-            state.pendingScoop = null;
-            log.info("Interrupted scoop due to {}", reason);
-        }
-    }
-
-    // ---------- Begin handling ----------
-    public void handleBegin(EventRequest request, OpType opType) {
-        int mixerId = request.getMixerId();
-        MixerState state = getState(mixerId);
-        synchronized (state) {
-            EquipmentState eq = equipmentStateHolder.getState(mixerId);
-
-            if (equipmentCheckEnabled) {
-                if (properties.gateRequiredTypeSet().contains(opType)) {
-                    if (!eq.gateOpen()) throw new IllegalStateException("Gate CLOSED");
-                }
-                if (properties.isForbidBeginWhenTilted() && eq.tilt()) throw new IllegalStateException("Cannot begin when tilted");
-            } else {
-                log.debug("Equipment checks disabled for mixer {}, proceeding without gate/tilt validation", mixerId);
-            }
-
-            ZonedDateTime beginZdt = parseZoned(request.getTimeStamp());
-            String beginTimeStr = formatStorage(beginZdt);
-            String folder = request.getFolder();
-
-            switch (opType) {
-                case INGOTS:
-                    handleIngotsBegin(state, mixerId, beginTimeStr, folder, beginZdt);
-                    break;
-                case FLUX:
-                case DISLAY:
-                    handleMixedBegin(state, mixerId, opType, beginTimeStr, folder, beginZdt);
-                    break;
-                case SCOOP:
-                    handleScoopBegin(state, mixerId, beginTimeStr, folder, beginZdt);
-                    break;
-                case PROBA:
-                    handleProbaBegin(state, mixerId, beginTimeStr, folder, beginZdt);
-                    break;
-            }
-        }
-    }
-
-    // ---------- Finish handling ----------
-    public void handleFinish(EventRequest request, OpType opType) {
-        int mixerId = request.getMixerId();
-        MixerState state = getState(mixerId);
-        synchronized (state) {
-            ZonedDateTime finishZdt = parseZoned(request.getTimeStamp());
-            String finishTimeStr = formatStorage(finishZdt);
-
-            switch (opType) {
-                case INGOTS:
-                    handleIngotsFinish(state, mixerId, finishTimeStr, finishZdt);
-                    break;
-                case FLUX:
-                case DISLAY:
-                    handleMixedFinish(state, mixerId, opType, finishTimeStr, finishZdt);
-                    break;
-                case SCOOP:
-                    handleScoopFinish(state, mixerId, finishTimeStr, finishZdt);
-                    break;
-                case PROBA:
-                    handleProbaFinish(state, mixerId, finishTimeStr, finishZdt);
-                    break;
-            }
-        }
-    }
-
-    // ---------- INGOTS ----------
-    private void handleIngotsBegin(MixerState state, int mixerId, String timeStr, String folder, ZonedDateTime beginZdt) {
-        if (state.activeIngots == null || state.activeIngots.finishTime != null) {
-            state.activeIngots = new ActiveOperation(timeStr, folder);
-            String externalId = outerAnswerClient.createEvent(mixerId, formatOuter(beginZdt), folder);
-            state.activeIngots.externalId = externalId;
-            log.info("Begin ingots, externalId={}", externalId);
-            if (state.activeMixed != null) {
-                log.info("Ingots discarding active mixed");
-                state.activeMixed = null;
-            }
-        } else {
-            ZonedDateTime existingBegin = toZonedDateTime(state.activeIngots.beginTime);
-            if (beginZdt.isBefore(existingBegin)) {
-                state.activeIngots.beginTime = timeStr;
-                state.activeIngots.folder = folder;
-                log.info("Updated ingots begin to earlier {}", timeStr);
-            }
-        }
-    }
-
-    private void handleIngotsFinish(MixerState state, int mixerId, String finishStr, ZonedDateTime finishZdt) {
-        if (state.activeIngots == null || state.activeIngots.finishTime != null) {
-            throw new IllegalStateException("Finish ingots without active begin");
-        }
-        ZonedDateTime beginZdt = toZonedDateTime(state.activeIngots.beginTime);
-        if (finishZdt.isBefore(beginZdt)) throw new IllegalStateException("Finish before begin");
-        if (state.activeIngots.finishTime == null || finishZdt.isAfter(toZonedDateTime(state.activeIngots.finishTime))) {
-            state.activeIngots.finishTime = finishStr;
-        }
-        if (state.activeIngots.externalId != null) {
-            outerAnswerClient.finishEvent(state.activeIngots.externalId, formatOuter(finishZdt));
-        }
-        emitEvent(mixerId, OpType.INGOTS, state.activeIngots.beginTime, state.activeIngots.finishTime, state.activeIngots.folder);
-        state.activeIngots = null;
-        log.info("Finished ingots");
-    }
-
-    // ---------- MIXED ----------
-    private void handleMixedBegin(MixerState state, int mixerId, OpType opType, String timeStr, String folder, ZonedDateTime beginZdt) {
-        if (state.activeIngots != null && state.activeIngots.finishTime == null) {
-            log.info("Ingots active, ignoring mixed begin");
+        if (state.activeMixed == null) {
             return;
         }
-        if (state.activeMixed != null && state.activeMixed.finishTime == null) {
-            // A dislay begin can extend the currently active flux window.
-            if (state.activeMixed.type == OpType.FLUX && opType == OpType.DISLAY) {
-                ZonedDateTime existingBegin = toZonedDateTime(state.activeMixed.beginTime);
-                if (beginZdt.isBefore(existingBegin)) {
-                    state.activeMixed.beginTime = timeStr;
-                    log.info("Converted slag begin to flux, updated begin to {}", timeStr);
-                }
+
+        MixedOperation operation = state.activeMixed;
+        ZonedDateTime finishZdt = toZonedDateTime(finishTime);
+        finishExternal(operation.type, operation.externalId, finishZdt);
+
+        if (operation.type == OpType.FLUX) {
+            state.lastCompletedFluxFinishTime = finishTime;
+            state.lastFluxFolder = operation.folder;
+        }
+
+        state.activeMixed = null;
+        log.info("Interrupted {} for mixer {} due to {}", operation.type, mixerId, reason);
+    }
+
+    private void interruptSimple(MixerState state,
+                                 int mixerId,
+                                 OpType type,
+                                 ActiveOperation operation,
+                                 String finishTime,
+                                 String reason) {
+        if (operation == null) {
+            return;
+        }
+
+        ZonedDateTime finishZdt = toZonedDateTime(finishTime);
+        finishExternal(type, operation.externalId, finishZdt);
+        log.info("Interrupted {} for mixer {} due to {}", type, mixerId, reason);
+    }
+
+    // ---------- Входящий begin ----------
+
+    public void handleBegin(EventRequest request, OpType opType) {
+        int mixerId = request.getMixerId();
+        /*
+         * Парсим время до входа в synchronized-блок.
+         * Это чистое вычисление без изменения состояния, поэтому оно не должно держать lock дольше нужного.
+         */
+        ZonedDateTime beginZdt = parseZoned(request.getTimeStamp());
+        String beginTimeStr = formatStorage(beginZdt);
+        String folder = request.getFolder();
+
+        log.info("Incoming begin {} mixer={} date={}", properties.eventTypeName(opType), mixerId, formatOuter(beginZdt));
+
+        MixerState state = getState(mixerId);
+        synchronized (state) {
+            /*
+             * Все проверки и изменения состояния одного mixerId идут под одним lock.
+             * Так два параллельных begin не смогут одновременно создать две активные записи.
+             */
+            validateEquipmentForBegin(mixerId, opType);
+
+            switch (opType) {
+                case INGOTS -> handleIngotsBegin(state, mixerId, beginTimeStr, folder, beginZdt);
+                case FLUX, DISLAG -> handleMixedBegin(state, mixerId, opType, beginTimeStr, folder, beginZdt);
+                case SCOOP -> handleScoopBegin(state, mixerId, beginTimeStr, folder, beginZdt);
+                case PROBA -> handleProbaBegin(state, mixerId, beginTimeStr, folder, beginZdt);
+            }
+        }
+    }
+
+    // ---------- Входящий finish ----------
+
+    public void handleFinish(EventRequest request, OpType opType) {
+        int mixerId = request.getMixerId();
+        /*
+         * Finish тоже нормализуется до +0700 до поиска операции.
+         * Если входное время пришло с другим offset, сравнение с begin все равно будет корректным.
+         */
+        ZonedDateTime finishZdt = parseZoned(request.getTimeStamp());
+
+        log.info("Incoming finish {} mixer={} date={}", properties.eventTypeName(opType), mixerId, formatOuter(finishZdt));
+
+        MixerState state = getState(mixerId);
+        synchronized (state) {
+            switch (opType) {
+                case INGOTS -> handleIngotsFinish(state, mixerId, finishZdt);
+                case FLUX, DISLAG -> handleMixedFinish(state, mixerId, opType, finishZdt);
+                case SCOOP -> handleScoopFinish(state, mixerId, finishZdt);
+                case PROBA -> handleProbaFinish(state, mixerId, finishZdt);
+            }
+        }
+    }
+
+    // ---------- Ingots ----------
+
+    private void handleIngotsBegin(MixerState state, int mixerId, String timeStr, String folder, ZonedDateTime beginZdt) {
+        if (hasActiveMixed(state)) {
+            /*
+             * Ingots и mixed-операции используют один производственный участок.
+             * Мы не удаляем активный flux/dislag автоматически, потому что это скрыло бы потерю события.
+             */
+            throw new IllegalStateException("Cannot begin ingots while flux/dislag is active");
+        }
+        if (hasActiveIngots(state)) {
+            // Повторный begin ingots уточняет время, но не создает вторую внешнюю запись.
+            mergeEarlierBegin(state.activeIngots, timeStr, folder, beginZdt);
+            return;
+        }
+
+        ActiveOperation operation = new ActiveOperation(timeStr, folder);
+        operation.externalId = createExternal(OpType.INGOTS, mixerId, beginZdt, folder);
+        state.activeIngots = operation;
+        log.info("Begin ingots mixer={} externalId={}", mixerId, operation.externalId);
+    }
+
+    private void handleIngotsFinish(MixerState state, int mixerId, ZonedDateTime finishZdt) {
+        if (state.activeIngots == null) {
+            // Finish без сохраненного begin невозможно связать с внешним id, поэтому это конфликт.
+            throw new IllegalStateException("Finish ingots without active begin");
+        }
+
+        ensureFinishNotBeforeBegin(state.activeIngots.beginTime, finishZdt);
+        finishExternal(OpType.INGOTS, state.activeIngots.externalId, finishZdt);
+        state.activeIngots = null;
+        log.info("Finished ingots mixer={}", mixerId);
+    }
+
+    // ---------- Flux / Dislag / Separation ----------
+
+    private void handleMixedBegin(MixerState state,
+                                  int mixerId,
+                                  OpType opType,
+                                  String timeStr,
+                                  String folder,
+                                  ZonedDateTime beginZdt) {
+        if (hasActiveIngots(state)) {
+            /*
+             * Flux/dislag не стартуют поверх ingots.
+             * Здесь важен явный отказ, потому что автоматическое завершение ingots могло бы отправить
+             * во внешний сервис неправильную дату finish.
+             */
+            throw new IllegalStateException("Cannot begin flux/dislag while ingots is active");
+        }
+
+        if (state.activeMixed != null) {
+            if (state.activeMixed.type == OpType.FLUX && opType == OpType.DISLAG) {
+                /*
+                 * Строгая конвертация slag в текущий flux.
+                 * Внешний POST не повторяем: это все еще та же активная запись flux.
+                 */
+                mergeEarlierBegin(state.activeMixed, timeStr, folder, beginZdt);
+                log.info("Converted /shovel_slag begin to active flux for mixer {}", mixerId);
                 return;
             }
             if (state.activeMixed.type == opType) {
-                ZonedDateTime existingBegin = toZonedDateTime(state.activeMixed.beginTime);
-                if (beginZdt.isBefore(existingBegin)) {
-                    state.activeMixed.beginTime = timeStr;
-                    state.activeMixed.folder = folder;
-                    log.info("Updated {} begin to earlier {}", opType, timeStr);
-                }
+                // Такой же begin второй раз считаем повтором или уточнением раннего времени.
+                mergeEarlierBegin(state.activeMixed, timeStr, folder, beginZdt);
                 return;
             }
-            log.warn("Cannot begin {} while active {} is running", opType, state.activeMixed.type);
-            return;
+            throw new IllegalStateException("Cannot begin " + opType + " while " + state.activeMixed.type + " is active");
         }
 
-        // No active mixed operation: start a new one and optionally close separation.
-        if (opType == OpType.DISLAY) {
-            if (state.lastCompletedFluxFinishTime != null && state.lastFluxFolder != null) {
-                ZonedDateTime sepZdt = toZonedDateTime(state.lastCompletedFluxFinishTime);
-                String externalId = outerAnswerClient.createEvent(mixerId, formatOuter(sepZdt), state.lastFluxFolder);
-                outerAnswerClient.finishEvent(externalId, formatOuter(sepZdt));
-                OutputEvent sepEvent = new OutputEvent(mixerId, properties.getSeparationType(), state.lastCompletedFluxFinishTime, state.lastCompletedFluxFinishTime, state.lastFluxFolder);
-                outputSender.send(sepEvent);
-                log.info("Generated separation event, recorded in outer-answer, externalId={}", externalId);
-                state.lastCompletedFluxFinishTime = null;
-                state.lastFluxFolder = null;
-            }
-            state.activeMixed = new MixedOperation(OpType.DISLAY, timeStr, folder);
-        } else {
-            state.activeMixed = new MixedOperation(OpType.FLUX, timeStr, folder);
+        if (opType == OpType.DISLAG) {
+            /*
+             * Если перед dislag был завершенный flux, между ними нужно создать separation.
+             * Это делается прямо перед созданием dislag, потому что только здесь известно время начала dislag.
+             */
+            generateSeparationIfNeeded(state, mixerId, beginZdt);
         }
-        String externalId = outerAnswerClient.createEvent(mixerId, formatOuter(beginZdt), folder);
-        state.activeMixed.externalId = externalId;
-        log.info("Begin {} externalId={}", opType, externalId);
+
+        MixedOperation operation = new MixedOperation(opType, timeStr, folder);
+        operation.externalId = createExternal(opType, mixerId, beginZdt, folder);
+        state.activeMixed = operation;
+        log.info("Begin {} mixer={} externalId={}", properties.eventTypeName(opType), mixerId, operation.externalId);
     }
 
-    private void handleMixedFinish(MixerState state, int mixerId, OpType opType, String finishStr, ZonedDateTime finishZdt) {
-        if (state.activeIngots != null && state.activeIngots.finishTime == null) {
-            log.info("Ingots active, ignoring mixed finish");
+    private void generateSeparationIfNeeded(MixerState state, int mixerId, ZonedDateTime dislagBeginZdt) {
+        if (state.lastCompletedFluxFinishTime == null) {
+            // Нет завершенного flux - значит separation строить не из чего.
             return;
         }
-        if (state.activeMixed == null || state.activeMixed.finishTime != null) {
-            throw new IllegalStateException("Finish " + opType + " without active mixed operation");
+
+        ZonedDateTime separationBeginZdt = toZonedDateTime(state.lastCompletedFluxFinishTime);
+        if (dislagBeginZdt.isBefore(separationBeginZdt)) {
+            throw new IllegalStateException("Cannot generate separation: dislag begin is before flux finish");
         }
-        if (opType == OpType.DISLAY && state.activeMixed.type == OpType.FLUX) {
-            log.info("Finishing dislay converts to flux finish");
+
+        /*
+         * Separation - это промежуток между законченным flux и начатым dislag.
+         * Поэтому begin separation равен finish flux, а finish separation равен begin dislag.
+         * Внешне это выглядит как обычная операция: сначала POST separation,
+         * затем PUT separation/{id} с датой завершения.
+         */
+        String service = properties.getSeparationType();
+        String externalId = outerAnswerClient.createEvent(service, mixerId, formatOuter(separationBeginZdt), state.lastFluxFolder);
+        outerAnswerClient.finishEvent(service, externalId, formatOuter(dislagBeginZdt));
+        log.info("Generated separation mixer={} begin={} finish={} externalId={}",
+                mixerId, formatOuter(separationBeginZdt), formatOuter(dislagBeginZdt), externalId);
+
+        state.lastCompletedFluxFinishTime = null;
+        state.lastFluxFolder = null;
+    }
+
+    private void handleMixedFinish(MixerState state, int mixerId, OpType opType, ZonedDateTime finishZdt) {
+        if (state.activeMixed == null) {
+            // Нет активной mixed-операции - значит у finish нет внешнего id для закрытия.
+            throw new IllegalStateException("Finish " + opType + " without active begin");
+        }
+
+        /*
+         * Если во время active flux пришел finish /shovel_slag, по строгой логике
+         * это завершение текущего flux, а не произвольное создание dislag.
+         */
+        if (opType == OpType.DISLAG && state.activeMixed.type == OpType.FLUX) {
+            log.info("Converted /shovel_slag finish to active flux finish for mixer {}", mixerId);
         } else if (opType != state.activeMixed.type) {
             throw new IllegalStateException("Finish type mismatch: active " + state.activeMixed.type + ", received " + opType);
         }
-        ZonedDateTime beginZdt = toZonedDateTime(state.activeMixed.beginTime);
-        if (finishZdt.isBefore(beginZdt)) throw new IllegalStateException("Finish before begin");
-        if (state.activeMixed.finishTime == null || finishZdt.isAfter(toZonedDateTime(state.activeMixed.finishTime))) {
-            state.activeMixed.finishTime = finishStr;
-        }
-        if (state.activeMixed.externalId != null) {
-            outerAnswerClient.finishEvent(state.activeMixed.externalId, formatOuter(finishZdt));
-        }
-        emitEvent(mixerId, state.activeMixed.type, state.activeMixed.beginTime, state.activeMixed.finishTime, state.activeMixed.folder);
+
+        ensureFinishNotBeforeBegin(state.activeMixed.beginTime, finishZdt);
+        finishExternal(state.activeMixed.type, state.activeMixed.externalId, finishZdt);
+
         if (state.activeMixed.type == OpType.FLUX) {
-            state.lastCompletedFluxFinishTime = state.activeMixed.finishTime;
+            state.lastCompletedFluxFinishTime = formatStorage(finishZdt);
             state.lastFluxFolder = state.activeMixed.folder;
         }
+
+        OpType finishedType = state.activeMixed.type;
         state.activeMixed = null;
-        log.info("Finished {} for mixer {}", opType, mixerId);
+        log.info("Finished {} mixer={}", properties.eventTypeName(finishedType), mixerId);
     }
 
-    // ---------- SCOOP ----------
+    // ---------- Scoop ----------
+
     private void handleScoopBegin(MixerState state, int mixerId, String timeStr, String folder, ZonedDateTime beginZdt) {
-        if (state.pendingScoop == null || state.pendingScoop.finishTime != null) {
-            state.pendingScoop = new ActiveOperation(timeStr, folder);
-            String externalId = outerAnswerClient.createEvent(mixerId, formatOuter(beginZdt), folder);
-            state.pendingScoop.externalId = externalId;
-            log.info("Begin scoop externalId={}", externalId);
-        } else {
-            ZonedDateTime existingBegin = toZonedDateTime(state.pendingScoop.beginTime);
-            if (beginZdt.isBefore(existingBegin)) {
-                state.pendingScoop.beginTime = timeStr;
-                state.pendingScoop.folder = folder;
-                log.info("Updated scoop begin to earlier {}", timeStr);
-            }
+        if (state.activeScoop != null) {
+            // Scoop хранится отдельно, поэтому может сосуществовать с mixed/ingots, но не сам с собой.
+            mergeEarlierBegin(state.activeScoop, timeStr, folder, beginZdt);
+            return;
         }
+
+        ActiveOperation operation = new ActiveOperation(timeStr, folder);
+        operation.externalId = createExternal(OpType.SCOOP, mixerId, beginZdt, folder);
+        state.activeScoop = operation;
+        log.info("Begin scoop mixer={} externalId={}", mixerId, operation.externalId);
     }
 
-    private void handleScoopFinish(MixerState state, int mixerId, String finishStr, ZonedDateTime finishZdt) {
-        if (state.pendingScoop == null || state.pendingScoop.finishTime != null) {
+    private void handleScoopFinish(MixerState state, int mixerId, ZonedDateTime finishZdt) {
+        if (state.activeScoop == null) {
+            // Без activeScoop нечего закрывать и некуда подставить внешний id.
             throw new IllegalStateException("Finish scoop without active begin");
         }
-        ZonedDateTime beginZdt = toZonedDateTime(state.pendingScoop.beginTime);
-        if (finishZdt.isBefore(beginZdt)) throw new IllegalStateException("Finish before begin");
-        if (state.pendingScoop.finishTime == null || finishZdt.isAfter(toZonedDateTime(state.pendingScoop.finishTime))) {
-            state.pendingScoop.finishTime = finishStr;
-        }
-        if (state.pendingScoop.externalId != null) {
-            outerAnswerClient.finishEvent(state.pendingScoop.externalId, formatOuter(finishZdt));
-        }
-        emitEvent(mixerId, OpType.SCOOP, state.pendingScoop.beginTime, state.pendingScoop.finishTime, state.pendingScoop.folder);
-        state.pendingScoop = null;
-        log.info("Finished scoop");
+
+        ensureFinishNotBeforeBegin(state.activeScoop.beginTime, finishZdt);
+        finishExternal(OpType.SCOOP, state.activeScoop.externalId, finishZdt);
+        state.activeScoop = null;
+        log.info("Finished scoop mixer={}", mixerId);
     }
 
-    // ---------- PROBA ----------
+    // ---------- Proba ----------
+
     private void handleProbaBegin(MixerState state, int mixerId, String timeStr, String folder, ZonedDateTime beginZdt) {
-        if (state.pendingProba == null || state.pendingProba.finishTime != null) {
-            state.pendingProba = new ActiveOperation(timeStr, folder);
-            String externalId = outerAnswerClient.createEvent(mixerId, formatOuter(beginZdt), folder);
-            state.pendingProba.externalId = externalId;
-            log.info("Begin proba externalId={}", externalId);
-        } else {
-            ZonedDateTime existingBegin = toZonedDateTime(state.pendingProba.beginTime);
-            if (beginZdt.isBefore(existingBegin)) {
-                state.pendingProba.beginTime = timeStr;
-                state.pendingProba.folder = folder;
-                log.info("Updated proba begin to earlier {}", timeStr);
-            }
+        if (state.activeProba != null) {
+            // Повторный begin proba не создает дубль во внешней системе.
+            mergeEarlierBegin(state.activeProba, timeStr, folder, beginZdt);
+            return;
         }
+
+        ActiveOperation operation = new ActiveOperation(timeStr, folder);
+        operation.externalId = createExternal(OpType.PROBA, mixerId, beginZdt, folder);
+        state.activeProba = operation;
+        log.info("Begin proba mixer={} externalId={}", mixerId, operation.externalId);
     }
 
-    private void handleProbaFinish(MixerState state, int mixerId, String finishStr, ZonedDateTime finishZdt) {
-        if (state.pendingProba == null || state.pendingProba.finishTime != null) {
+    private void handleProbaFinish(MixerState state, int mixerId, ZonedDateTime finishZdt) {
+        if (state.activeProba == null) {
+            // Finish proba без begin не может быть идемпотентно закрыт, потому что id неизвестен.
             throw new IllegalStateException("Finish proba without active begin");
         }
-        ZonedDateTime beginZdt = toZonedDateTime(state.pendingProba.beginTime);
-        if (finishZdt.isBefore(beginZdt)) throw new IllegalStateException("Finish before begin");
-        if (state.pendingProba.finishTime == null || finishZdt.isAfter(toZonedDateTime(state.pendingProba.finishTime))) {
-            state.pendingProba.finishTime = finishStr;
-        }
-        if (state.pendingProba.externalId != null) {
-            outerAnswerClient.finishEvent(state.pendingProba.externalId, formatOuter(finishZdt));
-        }
-        emitEvent(mixerId, OpType.PROBA, state.pendingProba.beginTime, state.pendingProba.finishTime, state.pendingProba.folder);
-        state.pendingProba = null;
-        log.info("Finished proba");
+
+        ensureFinishNotBeforeBegin(state.activeProba.beginTime, finishZdt);
+        finishExternal(OpType.PROBA, state.activeProba.externalId, finishZdt);
+        state.activeProba = null;
+        log.info("Finished proba mixer={}", mixerId);
     }
 }

@@ -9,6 +9,13 @@ import jakarta.validation.constraints.Positive;
 @Schema(description = "Входящее событие от ИИ")
 public class EventRequest {
 
+    /*
+     * Для читателя не из Java:
+     * DTO - это обычный объект-переносчик данных, почти как простой словарь
+     * с заранее описанными полями. Spring и Jackson сами собирают его из JSON.
+     * Аннотации @NotNull/@NotBlank/@Positive - это проверки входных данных
+     * до попадания запроса в бизнес-логику.
+     */
     @NotNull(message = "mixer_id is required")
     @Positive(message = "mixer_id must be positive")
     @Schema(description = "Идентификатор миксера", example = "123")
@@ -16,11 +23,11 @@ public class EventRequest {
     private Integer mixerId;
 
     @NotBlank(message = "status is required")
-    @Schema(description = "Статус. В новой схеме POST-эндпоинты принимают только begin", example = "begin")
+    @Schema(description = "Статус входящего события: begin или finish", example = "begin")
     private String status;
 
     @NotBlank(message = "time_stamp is required")
-    @Schema(description = "Время в формате yyyy-MM-dd_HH-mm-ss, допускается суффикс z", example = "2026-05-25_10-30-00")
+    @Schema(description = "Время в формате yyyy-MM-dd_HH-mm-ss, также допускается Z/UTC или смещение", example = "2026-05-25_10-30-00")
     @JsonProperty("time_stamp")
     private String timeStamp;
 

@@ -1,4 +1,5 @@
 server:
+  # HTTP-порт, на котором Spring Boot принимает запросы от ИИ и ручные запросы оборудования.
   port: ${SERVER_PORT:8080}
 
 spring:
@@ -7,68 +8,38 @@ spring:
 
 springdoc:
   swagger-ui:
+    # Swagger UI помогает вручную посмотреть и дернуть входные endpoint-ы.
     path: ${SWAGGER_UI_PATH:/swagger-ui.html}
 
-output:
-  url: ${OUTPUT_URL:}
-  method: ${OUTPUT_METHOD:POST}
-  connect-timeout-millis: ${OUTPUT_CONNECT_TIMEOUT_MILLIS:10000}
-  read-timeout-millis: ${OUTPUT_READ_TIMEOUT_MILLIS:30000}
-
 outer-answer:
-  url: ${OUTER_ANSWER_URL:http://localhost:9090/api/events}
-  create-path: ${OUTER_ANSWER_CREATE_PATH:/}
-  finish-path: ${OUTER_ANSWER_FINISH_PATH:/:id}
+  # Базовый адрес внешнего сервиса операций; к нему код добавляет /flux, /scoop, /flux/{id} и т.п.
+  url: ${OUTER_ANSWER_URL:}
+  # Лимит защищает внешний сервис от слишком большого числа одновременных POST/PUT.
   max-concurrent: ${OUTER_ANSWER_MAX_CONCURRENT:5}
   acquire-timeout-seconds: ${OUTER_ANSWER_ACQUIRE_TIMEOUT_SECONDS:30}
   connect-timeout-millis: ${OUTER_ANSWER_CONNECT_TIMEOUT_MILLIS:10000}
   read-timeout-millis: ${OUTER_ANSWER_READ_TIMEOUT_MILLIS:30000}
-  create-method: ${OUTER_ANSWER_CREATE_METHOD:POST}
-  finish-method: ${OUTER_ANSWER_FINISH_METHOD:PUT}
-  mixer-field: ${OUTER_ANSWER_MIXER_FIELD:mixer}
-  date-field: ${OUTER_ANSWER_DATE_FIELD:date}
-  folder-field: ${OUTER_ANSWER_FOLDER_FIELD:imagesFolderPath}
-  response-id-fields: ${OUTER_ANSWER_RESPONSE_ID_FIELDS:id,event_id,eventId,data.id}
 
 normalizer:
-  endpoints:
-    scoop: ${NORMALIZER_ENDPOINT_SCOOP:/scoop}
-    table: ${NORMALIZER_ENDPOINT_TABLE:/table}
-    shovel-mixer: ${NORMALIZER_ENDPOINT_SHOVEL_MIXER:/shovel_mixer}
-    shovel-slag: ${NORMALIZER_ENDPOINT_SHOVEL_SLAG:/shovel_slag}
-    sampling: ${NORMALIZER_ENDPOINT_SAMPLING:/sampling}
-    equipment-base: ${NORMALIZER_ENDPOINT_EQUIPMENT_BASE:/equipment}
-    equipment: ${normalizer.endpoints.equipment-base}/{mixer_id}
-  begin-status: ${NORMALIZER_BEGIN_STATUS:begin}
-  finish-status: ${NORMALIZER_FINISH_STATUS:finish}
+  # Все входные даты приводятся к этой зоне до проверок и отправки наружу.
   fixed-zone: ${NORMALIZER_FIXED_ZONE:+07:00}
-  default-input-zone: ${NORMALIZER_DEFAULT_INPUT_ZONE:UTC}
+  # Если time_stamp пришел без Z или offset, считаем его временем этой зоны.
+  default-input-zone: ${NORMALIZER_DEFAULT_INPUT_ZONE:+07:00}
   input-time-pattern: ${NORMALIZER_INPUT_TIME_PATTERN:yyyy-MM-dd_HH-mm-ss}
-  input-offset-pattern: ${NORMALIZER_INPUT_OFFSET_PATTERN:xx}
+  input-offset-pattern: ${NORMALIZER_INPUT_OFFSET_PATTERN:XX}
   storage-time-pattern: ${NORMALIZER_STORAGE_TIME_PATTERN:yyyy-MM-dd_HH-mm-ss}
   outer-time-pattern: ${NORMALIZER_OUTER_TIME_PATTERN:yyyy-MM-dd_HH-mm-ssxx}
-  flux-type: ${NORMALIZER_TYPE_FLUX:flux}
-  dislay-type: ${NORMALIZER_TYPE_DISLAY:dislay}
-  ingots-type: ${NORMALIZER_TYPE_INGOTS:ingots}
-  scoop-type: ${NORMALIZER_TYPE_SCOOP:scoop}
-  proba-type: ${NORMALIZER_TYPE_PROBA:proba}
-  separation-type: ${NORMALIZER_TYPE_SEPARATION:separation}
-  gate-open-value: ${NORMALIZER_GATE_OPEN_VALUE:OPEN}
-  gate-required-types: ${NORMALIZER_GATE_REQUIRED_TYPES:FLUX,DISLAY,SCOOP}
-  forbid-begin-when-tilted: ${NORMALIZER_FORBID_BEGIN_WHEN_TILTED:true}
-  interrupt-mixed-on-tilt: ${NORMALIZER_INTERRUPT_MIXED_ON_TILT:true}
-  interrupt-scoop-on-tilt: ${NORMALIZER_INTERRUPT_SCOOP_ON_TILT:true}
-  interrupt-mixed-on-gate-closed: ${NORMALIZER_INTERRUPT_MIXED_ON_GATE_CLOSED:true}
-  interrupt-scoop-on-gate-closed: ${NORMALIZER_INTERRUPT_SCOOP_ON_GATE_CLOSED:true}
-  tilt-interrupt-reason: ${NORMALIZER_TILT_INTERRUPT_REASON:mixer tilted}
-  gate-closed-interrupt-reason: ${NORMALIZER_GATE_CLOSED_INTERRUPT_REASON:gate closed}
 
 equipment:
+  # Можно отключить проверки оборудования для локального отладочного запуска.
   check-enabled: ${EQUIPMENT_CHECK_ENABLED:true}
+  # Дефолт нужен только до первого реального значения от polling или PUT /equipment/{mixer_id}.
   default-gate-open: ${EQUIPMENT_DEFAULT_GATE_OPEN:true}
   default-tilt: ${EQUIPMENT_DEFAULT_TILT:false}
   polling:
-    enabled: ${EQUIPMENT_POLLING_ENABLED:false}
+    # Фоновый опрос держит локальный кэш шторки и наклона свежим.
+    enabled: ${EQUIPMENT_POLLING_ENABLED:true}
+    # 120 секунд - это 2 минуты между завершением одного опроса и стартом следующего.
     interval-seconds: ${EQUIPMENT_POLLING_INTERVAL:120}
     url: ${EQUIPMENT_POLLING_URL:}
     connect-timeout-millis: ${EQUIPMENT_POLLING_CONNECT_TIMEOUT_MILLIS:10000}
@@ -79,7 +50,8 @@ equipment:
     legacy-tilt-true-values: ${EQUIPMENT_POLLING_LEGACY_TILT_TRUE_VALUES:true,1}
 
 asutp:
-  enabled: ${ASUTP_ENABLED:false}
+  # Если true, polling берет состояние через цепочку url_1 -> url_2 -> url_3.
+  enabled: ${ASUTP_ENABLED:true}
   url-1: ${ASUTP_URL_1:${URL_1:}}
   url-2: ${ASUTP_URL_2:${URL_2:}}
   url-3: ${ASUTP_URL_3:${URL_3:}}
@@ -88,20 +60,21 @@ asutp:
   method-3: ${ASUTP_METHOD_3:POST}
   domain-name: ${ASUTP_DOMAIN_NAME:${DOMAIN_NAME:}}
   password: ${ASUTP_PASSWORD:${PASSWORD:}}
-  last-house-id: ${ASUTP_LAST_HOUSE_ID:${LAST_HOUSE_ID:}}
+  cast-house-id: ${ASUTP_CAST_HOUSE_ID:${CAST_HOUSE_ID:${ASUTP_LAST_HOUSE_ID:${LAST_HOUSE_ID:}}}}
   domain-name-field: ${ASUTP_DOMAIN_NAME_FIELD:domainName}
   password-field: ${ASUTP_PASSWORD_FIELD:password}
-  last-house-id-field: ${ASUTP_LAST_HOUSE_ID_FIELD:LastHouseId}
+  cast-house-id-field: ${ASUTP_CAST_HOUSE_ID_FIELD:castHouseId}
   auth-body: ${ASUTP_AUTH_BODY:}
   context-body: ${ASUTP_CONTEXT_BODY:}
   data-body: ${ASUTP_DATA_BODY:}
   token-header: ${ASUTP_TOKEN_HEADER:Authorization}
-  token-scheme: ${ASUTP_TOKEN_SCHEME:Bearer}
-  token-base64-encode: ${ASUTP_TOKEN_BASE64_ENCODE:false}
   token-fields: ${ASUTP_TOKEN_FIELDS:token,data.token}
   tag-list-fields: ${ASUTP_TAG_LIST_FIELDS:data,items,result}
-  tag-id-fields: ${ASUTP_TAG_ID_FIELDS:tg_id,tgId,id}
+  tag-id-fields: ${ASUTP_TAG_ID_FIELDS:tagId,tg_id,tgId,id}
   tag-value-field: ${ASUTP_TAG_VALUE_FIELD:value}
+  data-tag-ids-field: ${ASUTP_DATA_TAG_IDS_FIELD:tagIds}
+  # tag-ids отправляются в url_3, а gate-tags/tilt-tags объясняют, какой tagId к какому mixer_id относится.
+  tag-ids: ${ASUTP_TAG_IDS:}
   gate-tags: ${ASUTP_GATE_TAGS:}
   tilt-tags: ${ASUTP_TILT_TAGS:}
   gate-open-value: ${ASUTP_GATE_OPEN_VALUE:1}

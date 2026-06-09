@@ -6,10 +6,14 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/*
+ * Хранилище текущего состояния оборудования по mixerId.
+ * Данные живут в памяти процесса и обновляются через HTTP или polling.
+ */
 @Component
 public class EquipmentStateHolder {
 
-    // Concurrent reads/writes are enough here because each update replaces the whole value.
+    // Потокобезопасной map достаточно: каждое обновление целиком заменяет состояние.
     private final Map<Integer, EquipmentState> states = new ConcurrentHashMap<>();
     private final EquipmentState defaultState;
 
@@ -21,10 +25,16 @@ public class EquipmentStateHolder {
     public record EquipmentState(boolean gateOpen, boolean tilt) {
     }
 
+    // Запоминает актуальное состояние конкретного миксера.
     public void update(int mixerId, boolean gateOpen, boolean tilt) {
         states.put(mixerId, new EquipmentState(gateOpen, tilt));
     }
 
+    public boolean hasState(int mixerId) {
+        return states.containsKey(mixerId);
+    }
+
+    // Если по миксеру еще нет данных, возвращается состояние по умолчанию.
     public EquipmentState getState(int mixerId) {
         return states.getOrDefault(mixerId, defaultState);
     }

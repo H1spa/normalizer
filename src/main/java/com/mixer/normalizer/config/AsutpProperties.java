@@ -8,6 +8,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/*
+ * Настройки интеграции с АСУ ТП.
+ * Класс только читает и преобразует конфиг: сетевые вызовы делает AsutpEquipmentClient.
+ */
 @Component
 @ConfigurationProperties(prefix = "asutp")
 public class AsutpProperties {
@@ -20,20 +24,20 @@ public class AsutpProperties {
     private String method3 = "POST";
     private String domainName;
     private String password;
-    private String lastHouseId;
+    private String castHouseId;
     private String domainNameField = "domainName";
     private String passwordField = "password";
-    private String lastHouseIdField = "LastHouseId";
+    private String castHouseIdField = "castHouseId";
     private String authBody;
     private String contextBody;
     private String dataBody;
     private String tokenHeader = "Authorization";
-    private String tokenScheme = "Bearer";
-    private boolean tokenBase64Encode;
     private String tokenFields = "token,data.token";
     private String tagListFields = "data,items,result";
-    private String tagIdFields = "tg_id,tgId,id";
+    private String tagIdFields = "tagId,tg_id,tgId,id";
     private String tagValueField = "value";
+    private String dataTagIdsField = "tagIds";
+    private String tagIds;
     private String gateTags;
     private String tiltTags;
     private String gateOpenValue = "1";
@@ -113,12 +117,26 @@ public class AsutpProperties {
         this.password = password;
     }
 
-    public String getLastHouseId() {
-        return lastHouseId;
+    public String getCastHouseId() {
+        return castHouseId;
     }
 
+    public void setCastHouseId(String castHouseId) {
+        this.castHouseId = castHouseId;
+    }
+
+    /*
+     * Алиасы оставлены, чтобы старые переменные/настройки не ломали запуск.
+     * В новый data_2 уходит именно castHouseId.
+     */
+    @Deprecated
+    public String getLastHouseId() {
+        return castHouseId;
+    }
+
+    @Deprecated
     public void setLastHouseId(String lastHouseId) {
-        this.lastHouseId = lastHouseId;
+        this.castHouseId = lastHouseId;
     }
 
     public String getDomainNameField() {
@@ -137,12 +155,22 @@ public class AsutpProperties {
         this.passwordField = passwordField;
     }
 
-    public String getLastHouseIdField() {
-        return lastHouseIdField;
+    public String getCastHouseIdField() {
+        return castHouseIdField;
     }
 
+    public void setCastHouseIdField(String castHouseIdField) {
+        this.castHouseIdField = castHouseIdField;
+    }
+
+    @Deprecated
+    public String getLastHouseIdField() {
+        return castHouseIdField;
+    }
+
+    @Deprecated
     public void setLastHouseIdField(String lastHouseIdField) {
-        this.lastHouseIdField = lastHouseIdField;
+        this.castHouseIdField = lastHouseIdField;
     }
 
     public String getAuthBody() {
@@ -177,22 +205,6 @@ public class AsutpProperties {
         this.tokenHeader = tokenHeader;
     }
 
-    public String getTokenScheme() {
-        return tokenScheme;
-    }
-
-    public void setTokenScheme(String tokenScheme) {
-        this.tokenScheme = tokenScheme;
-    }
-
-    public boolean isTokenBase64Encode() {
-        return tokenBase64Encode;
-    }
-
-    public void setTokenBase64Encode(boolean tokenBase64Encode) {
-        this.tokenBase64Encode = tokenBase64Encode;
-    }
-
     public String getTokenFields() {
         return tokenFields;
     }
@@ -223,6 +235,22 @@ public class AsutpProperties {
 
     public void setTagValueField(String tagValueField) {
         this.tagValueField = tagValueField;
+    }
+
+    public String getDataTagIdsField() {
+        return dataTagIdsField;
+    }
+
+    public void setDataTagIdsField(String dataTagIdsField) {
+        this.dataTagIdsField = dataTagIdsField;
+    }
+
+    public String getTagIds() {
+        return tagIds;
+    }
+
+    public void setTagIds(String tagIds) {
+        this.tagIds = tagIds;
     }
 
     public String getGateTags() {
@@ -305,7 +333,27 @@ public class AsutpProperties {
         return parseList(tagIdFields);
     }
 
-    // Expected format: "1=gate_tag_1,2=gate_tag_2".
+    public List<String> getAllConfiguredTagIds() {
+        List<String> result = new ArrayList<>();
+        for (String tagId : parseList(tagIds)) {
+            addUniqueTag(result, tagId);
+        }
+        for (String tagId : getGateTagMap().values()) {
+            addUniqueTag(result, tagId);
+        }
+        for (String tagId : getTiltTagMap().values()) {
+            addUniqueTag(result, tagId);
+        }
+        return result;
+    }
+
+    private static void addUniqueTag(List<String> result, String tagId) {
+        if (tagId != null && !tagId.isBlank() && !result.contains(tagId.trim())) {
+            result.add(tagId.trim());
+        }
+    }
+
+    // Ожидаемый формат: "1=gate_tag_1,2=gate_tag_2".
     private static Map<Integer, String> parseTagMap(String value) {
         Map<Integer, String> result = new LinkedHashMap<>();
         if (value == null || value.isBlank()) {
@@ -322,7 +370,7 @@ public class AsutpProperties {
         return result;
     }
 
-    // Expected format: "field=value,anotherField=anotherValue".
+    // Ожидаемый формат: "field=value,anotherField=anotherValue".
     private static Map<String, Object> parseBodyMap(String value) {
         Map<String, Object> result = new LinkedHashMap<>();
         if (value == null || value.isBlank()) {
@@ -339,7 +387,7 @@ public class AsutpProperties {
         return result;
     }
 
-    // Expected format: "field,data.field,anotherField".
+    // Ожидаемый формат: "field,data.field,anotherField".
     private static List<String> parseList(String value) {
         List<String> result = new ArrayList<>();
         if (value == null || value.isBlank()) {

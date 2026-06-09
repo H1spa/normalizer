@@ -11,9 +11,14 @@ import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/*
+ * Общая обработка ошибок для всех контроллеров.
+ * Вместо пустого ответа клиент получает JSON с кодом, типом и сообщением.
+ */
 @RestControllerAdvice
 public class ApiExceptionHandler {
 
+    // Ошибки формата запроса и времени считаются некорректным запросом: HTTP 400.
     @ExceptionHandler({
             IllegalArgumentException.class,
             DateTimeParseException.class
@@ -22,11 +27,13 @@ public class ApiExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, e.getMessage());
     }
 
+    // Ошибки состояния процесса считаются конфликтом: например finish без begin.
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<Map<String, Object>> handleConflict(IllegalStateException e) {
         return error(HttpStatus.CONFLICT, e.getMessage());
     }
 
+    // Сюда попадают ошибки валидации @NotNull, @NotBlank, @Positive и похожих правил.
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, Object>> handleValidation(MethodArgumentNotValidException e) {
         Map<String, String> fields = new LinkedHashMap<>();
@@ -43,6 +50,7 @@ public class ApiExceptionHandler {
         return ResponseEntity.badRequest().body(body);
     }
 
+    // Собирает единый формат ответа об ошибке.
     private ResponseEntity<Map<String, Object>> error(HttpStatus status, String message) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", status.value());
