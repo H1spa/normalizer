@@ -1,5 +1,8 @@
 package com.mixer.normalizer.controller;
 
+import com.mixer.normalizer.audit.AuditAliasResolver;
+import com.mixer.normalizer.audit.AuditCodes;
+import com.mixer.normalizer.audit.service.AuditLogService;
 import com.mixer.normalizer.dto.EquipmentRequest;
 import com.mixer.normalizer.dto.EventRequest;
 import com.mixer.normalizer.service.EventNormalizer;
@@ -16,9 +19,15 @@ import org.springframework.web.bind.annotation.*;
 public class MixerController {
 
     private final EventNormalizer normalizer;
+    private final AuditLogService auditLogService;
+    private final AuditAliasResolver auditAliasResolver;
 
-    public MixerController(EventNormalizer normalizer) {
+    public MixerController(EventNormalizer normalizer,
+                           AuditLogService auditLogService,
+                           AuditAliasResolver auditAliasResolver) {
         this.normalizer = normalizer;
+        this.auditLogService = auditLogService;
+        this.auditAliasResolver = auditAliasResolver;
     }
 
     /*
@@ -31,66 +40,31 @@ public class MixerController {
     // /scoop отвечает за scoop: операция может идти параллельно с другими, но требует открытую шторку.
     @PostMapping("/scoop")
     public ResponseEntity<Void> handleScoop(@Valid @RequestBody EventRequest request) {
-        if (isBegin(request)) {
-            normalizer.handleBegin(request, EventNormalizer.OpType.SCOOP);
-        } else if (isFinish(request)) {
-            normalizer.handleFinish(request, EventNormalizer.OpType.SCOOP);
-        } else {
-            throw new IllegalArgumentException("Invalid status");
-        }
-        return ResponseEntity.accepted().build();
+        return handleEvent(request, EventNormalizer.OpType.SCOOP);
     }
 
     // /table отвечает за ingots: эта операция несовместима с активными flux/dislag.
     @PostMapping("/table")
     public ResponseEntity<Void> handleTable(@Valid @RequestBody EventRequest request) {
-        if (isBegin(request)) {
-            normalizer.handleBegin(request, EventNormalizer.OpType.INGOTS);
-        } else if (isFinish(request)) {
-            normalizer.handleFinish(request, EventNormalizer.OpType.INGOTS);
-        } else {
-            throw new IllegalArgumentException("Invalid status");
-        }
-        return ResponseEntity.accepted().build();
+        return handleEvent(request, EventNormalizer.OpType.INGOTS);
     }
 
     // /shovel_mixer отвечает за flux: начало/конец флюса приходит тем же POST, меняется только status.
     @PostMapping("/shovel_mixer")
     public ResponseEntity<Void> handleShovelMixer(@Valid @RequestBody EventRequest request) {
-        if (isBegin(request)) {
-            normalizer.handleBegin(request, EventNormalizer.OpType.FLUX);
-        } else if (isFinish(request)) {
-            normalizer.handleFinish(request, EventNormalizer.OpType.FLUX);
-        } else {
-            throw new IllegalArgumentException("Invalid status");
-        }
-        return ResponseEntity.accepted().build();
+        return handleEvent(request, EventNormalizer.OpType.FLUX);
     }
 
     // /shovel_slag отвечает за dislag: URL сам выбирает тип операции, отдельное поле type не нужно.
     @PostMapping("/shovel_slag")
     public ResponseEntity<Void> handleShovelSlag(@Valid @RequestBody EventRequest request) {
-        if (isBegin(request)) {
-            normalizer.handleBegin(request, EventNormalizer.OpType.DISLAG);
-        } else if (isFinish(request)) {
-            normalizer.handleFinish(request, EventNormalizer.OpType.DISLAG);
-        } else {
-            throw new IllegalArgumentException("Invalid status");
-        }
-        return ResponseEntity.accepted().build();
+        return handleEvent(request, EventNormalizer.OpType.DISLAG);
     }
 
     // /sampling отвечает за proba: шторка для begin не нужна, но наклон все равно запрещает старт.
     @PostMapping("/sampling")
     public ResponseEntity<Void> handleSampling(@Valid @RequestBody EventRequest request) {
-        if (isBegin(request)) {
-            normalizer.handleBegin(request, EventNormalizer.OpType.PROBA);
-        } else if (isFinish(request)) {
-            normalizer.handleFinish(request, EventNormalizer.OpType.PROBA);
-        } else {
-            throw new IllegalArgumentException("Invalid status");
-        }
-        return ResponseEntity.accepted().build();
+        return handleEvent(request, EventNormalizer.OpType.PROBA);
     }
 
     /*
@@ -100,10 +74,32 @@ public class MixerController {
      */
     @PutMapping("/equipment/{mixer_id}")
     public ResponseEntity<Void> updateEquipment(@PathVariable("mixer_id") int mixerId, @Valid @RequestBody EquipmentRequest eq) {
+        auditLogService.enrichCurrent(mixerId, AuditCodes.EVENT_EQUIPMENT, AuditCodes.OPERATION_UNKNOWN);
+        auditLogService.log(AuditCodes.COMPONENT_WEB, AuditCodes.ACTION_VALIDATED, AuditCodes.INFO, AuditCodes.SUCCESS);
+        auditLogService.log(AuditCodes.COMPONENT_CORE, AuditCodes.ACTION_PROCESSING, AuditCodes.INFO, AuditCodes.STARTED);
         boolean gateOpen = "OPEN".equalsIgnoreCase(eq.getGate());
         boolean tilt = Boolean.TRUE.equals(eq.getTilt());
         normalizer.updateEquipment(mixerId, gateOpen, tilt);
         return ResponseEntity.ok().build();
+    }
+
+    private ResponseEntity<Void> handleEvent(EventRequest request, EventNormalizer.OpType operationType) {
+        String phaseAlias = auditAliasResolver.phase(request.getStatus());
+        auditLogService.enrichCurrent(
+                request.getMixerId(),
+                phaseAlias,
+                auditAliasResolver.operation(operationType));
+        auditLogService.log(AuditCodes.COMPONENT_WEB, AuditCodes.ACTION_VALIDATED, AuditCodes.INFO, AuditCodes.SUCCESS);
+        auditLogService.log(AuditCodes.COMPONENT_CORE, AuditCodes.ACTION_PROCESSING, AuditCodes.INFO, AuditCodes.STARTED);
+
+        if (isBegin(request)) {
+            normalizer.handleBegin(request, operationType);
+        } else if (isFinish(request)) {
+            normalizer.handleFinish(request, operationType);
+        } else {
+            throw new IllegalArgumentException("Invalid status");
+        }
+        return ResponseEntity.accepted().build();
     }
 
     // Статусы сравниваются без учета регистра, чтобы "BEGIN" и "begin" не расходились по смыслу.

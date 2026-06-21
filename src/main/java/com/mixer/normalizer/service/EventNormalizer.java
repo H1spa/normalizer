@@ -1,5 +1,8 @@
 package com.mixer.normalizer.service;
 
+import com.mixer.normalizer.audit.AuditAliasResolver;
+import com.mixer.normalizer.audit.AuditCodes;
+import com.mixer.normalizer.audit.service.AuditLogService;
 import com.mixer.normalizer.config.NormalizerProperties;
 import com.mixer.normalizer.dto.EventRequest;
 import com.mixer.normalizer.service.EquipmentStateHolder.EquipmentState;
@@ -36,6 +39,8 @@ public class EventNormalizer {
     private final OuterAnswerClient outerAnswerClient;
     private final EquipmentStateHolder equipmentStateHolder;
     private final NormalizerProperties properties;
+    private final AuditLogService auditLogService;
+    private final AuditAliasResolver auditAliasResolver;
     private final ZoneId fixedZone;
     private final DateTimeFormatter storageFormatter;
     private final DateTimeFormatter outerFormatter;
@@ -55,10 +60,14 @@ public class EventNormalizer {
 
     public EventNormalizer(OuterAnswerClient outerAnswerClient,
                            EquipmentStateHolder equipmentStateHolder,
-                           NormalizerProperties properties) {
+                           NormalizerProperties properties,
+                           AuditLogService auditLogService,
+                           AuditAliasResolver auditAliasResolver) {
         this.outerAnswerClient = outerAnswerClient;
         this.equipmentStateHolder = equipmentStateHolder;
         this.properties = properties;
+        this.auditLogService = auditLogService;
+        this.auditAliasResolver = auditAliasResolver;
         this.fixedZone = properties.fixedZoneId();
         this.storageFormatter = properties.storageFormatter();
         this.outerFormatter = properties.outerFormatter();
@@ -197,7 +206,7 @@ public class EventNormalizer {
 
     private void finishExternal(OpType type, String externalId, ZonedDateTime finishZdt) {
         if (externalId == null || externalId.isBlank()) {
-            throw new IllegalStateException("External id is missing for " + properties.eventTypeName(type));
+            throw new IllegalStateException("External id is missing for " + operationAlias(type));
         }
         String service = properties.eventTypeName(type);
         outerAnswerClient.finishEvent(service, externalId, formatOuter(finishZdt));
@@ -235,13 +244,18 @@ public class EventNormalizer {
 
         EquipmentState eq = equipmentStateHolder.getState(mixerId);
         if (eq.tilt()) {
-            log.warn("Rejected begin {} for mixer {}: mixer tilted", opType, mixerId);
+            log.warn("Operation rejected alias={} mixer={} reason=STATE_ALIAS_001", operationAlias(opType), mixerId);
             throw new IllegalStateException("Cannot begin when tilted");
         }
         if (gateRequiredTypes.contains(opType) && !eq.gateOpen()) {
-            log.warn("Rejected begin {} for mixer {}: gate closed", opType, mixerId);
+            log.warn("Operation rejected alias={} mixer={} reason=STATE_ALIAS_002", operationAlias(opType), mixerId);
             throw new IllegalStateException("Gate CLOSED");
         }
+        auditLogService.log(
+                AuditCodes.COMPONENT_CORE,
+                AuditCodes.ACTION_EQUIPMENT,
+                AuditCodes.INFO,
+                AuditCodes.SUCCESS);
     }
 
     // ---------- Оборудование ----------
@@ -312,7 +326,7 @@ public class EventNormalizer {
         }
 
         state.activeMixed = null;
-        log.info("Interrupted {} for mixer {} due to {}", operation.type, mixerId, reason);
+        log.info("Operation interrupted alias={} mixer={} reason={}", operationAlias(operation.type), mixerId, reason);
     }
 
     private void interruptSimple(MixerState state,
@@ -327,7 +341,7 @@ public class EventNormalizer {
 
         ZonedDateTime finishZdt = toZonedDateTime(finishTime);
         finishExternal(type, operation.externalId, finishZdt);
-        log.info("Interrupted {} for mixer {} due to {}", type, mixerId, reason);
+        log.info("Operation interrupted alias={} mixer={} reason={}", operationAlias(type), mixerId, reason);
     }
 
     // ---------- Входящий begin ----------
@@ -342,7 +356,14 @@ public class EventNormalizer {
         String beginTimeStr = formatStorage(beginZdt);
         String folder = request.getFolder();
 
-        log.info("Incoming begin {} mixer={} date={}", properties.eventTypeName(opType), mixerId, formatOuter(beginZdt));
+        String operationAlias = operationAlias(opType);
+        log.info("Incoming event phase={} operation={} mixer={} date={}",
+                AuditCodes.EVENT_BEGIN, operationAlias, mixerId, formatOuter(beginZdt));
+        auditLogService.log(
+                AuditCodes.COMPONENT_CORE,
+                AuditCodes.ACTION_NORMALIZED,
+                AuditCodes.INFO,
+                AuditCodes.SUCCESS);
 
         MixerState state = getState(mixerId);
         synchronized (state) {
@@ -358,6 +379,11 @@ public class EventNormalizer {
                 case SCOOP -> handleScoopBegin(state, mixerId, beginTimeStr, folder, beginZdt);
                 case PROBA -> handleProbaBegin(state, mixerId, beginTimeStr, folder, beginZdt);
             }
+            auditLogService.log(
+                    AuditCodes.COMPONENT_CORE,
+                    AuditCodes.ACTION_OUTPUT,
+                    AuditCodes.INFO,
+                    AuditCodes.SUCCESS);
         }
     }
 
@@ -371,7 +397,13 @@ public class EventNormalizer {
          */
         ZonedDateTime finishZdt = parseZoned(request.getTimeStamp());
 
-        log.info("Incoming finish {} mixer={} date={}", properties.eventTypeName(opType), mixerId, formatOuter(finishZdt));
+        log.info("Incoming event phase={} operation={} mixer={} date={}",
+                AuditCodes.EVENT_FINISH, operationAlias(opType), mixerId, formatOuter(finishZdt));
+        auditLogService.log(
+                AuditCodes.COMPONENT_CORE,
+                AuditCodes.ACTION_NORMALIZED,
+                AuditCodes.INFO,
+                AuditCodes.SUCCESS);
 
         MixerState state = getState(mixerId);
         synchronized (state) {
@@ -381,6 +413,11 @@ public class EventNormalizer {
                 case SCOOP -> handleScoopFinish(state, mixerId, finishZdt);
                 case PROBA -> handleProbaFinish(state, mixerId, finishZdt);
             }
+            auditLogService.log(
+                    AuditCodes.COMPONENT_CORE,
+                    AuditCodes.ACTION_OUTPUT,
+                    AuditCodes.INFO,
+                    AuditCodes.SUCCESS);
         }
     }
 
@@ -403,7 +440,7 @@ public class EventNormalizer {
         ActiveOperation operation = new ActiveOperation(timeStr, folder);
         operation.externalId = createExternal(OpType.INGOTS, mixerId, beginZdt, folder);
         state.activeIngots = operation;
-        log.info("Begin ingots mixer={} externalId={}", mixerId, operation.externalId);
+        log.info("Operation started alias={} mixer={}", operationAlias(OpType.INGOTS), mixerId);
     }
 
     private void handleIngotsFinish(MixerState state, int mixerId, ZonedDateTime finishZdt) {
@@ -415,7 +452,7 @@ public class EventNormalizer {
         ensureFinishNotBeforeBegin(state.activeIngots.beginTime, finishZdt);
         finishExternal(OpType.INGOTS, state.activeIngots.externalId, finishZdt);
         state.activeIngots = null;
-        log.info("Finished ingots mixer={}", mixerId);
+        log.info("Operation finished alias={} mixer={}", operationAlias(OpType.INGOTS), mixerId);
     }
 
     // ---------- Flux / Dislag / Separation ----------
@@ -442,7 +479,7 @@ public class EventNormalizer {
                  * Внешний POST не повторяем: это все еще та же активная запись flux.
                  */
                 mergeEarlierBegin(state.activeMixed, timeStr, folder, beginZdt);
-                log.info("Converted /shovel_slag begin to active flux for mixer {}", mixerId);
+                log.info("Operation transition alias={} mixer={}", operationAlias(opType), mixerId);
                 return;
             }
             if (state.activeMixed.type == opType) {
@@ -464,7 +501,7 @@ public class EventNormalizer {
         MixedOperation operation = new MixedOperation(opType, timeStr, folder);
         operation.externalId = createExternal(opType, mixerId, beginZdt, folder);
         state.activeMixed = operation;
-        log.info("Begin {} mixer={} externalId={}", properties.eventTypeName(opType), mixerId, operation.externalId);
+        log.info("Operation started alias={} mixer={}", operationAlias(opType), mixerId);
     }
 
     private void generateSeparationIfNeeded(MixerState state, int mixerId, ZonedDateTime dislagBeginZdt) {
@@ -487,8 +524,8 @@ public class EventNormalizer {
         String service = properties.getSeparationType();
         String externalId = outerAnswerClient.createEvent(service, mixerId, formatOuter(separationBeginZdt), state.lastFluxFolder);
         outerAnswerClient.finishEvent(service, externalId, formatOuter(dislagBeginZdt));
-        log.info("Generated separation mixer={} begin={} finish={} externalId={}",
-                mixerId, formatOuter(separationBeginZdt), formatOuter(dislagBeginZdt), externalId);
+        log.info("Operation generated alias=OPERATION_ALIAS_006 mixer={} begin={} finish={}",
+                mixerId, formatOuter(separationBeginZdt), formatOuter(dislagBeginZdt));
 
         state.lastCompletedFluxFinishTime = null;
         state.lastFluxFolder = null;
@@ -505,7 +542,7 @@ public class EventNormalizer {
          * это завершение текущего flux, а не произвольное создание dislag.
          */
         if (opType == OpType.DISLAG && state.activeMixed.type == OpType.FLUX) {
-            log.info("Converted /shovel_slag finish to active flux finish for mixer {}", mixerId);
+            log.info("Operation transition alias={} mixer={}", operationAlias(opType), mixerId);
         } else if (opType != state.activeMixed.type) {
             throw new IllegalStateException("Finish type mismatch: active " + state.activeMixed.type + ", received " + opType);
         }
@@ -520,7 +557,7 @@ public class EventNormalizer {
 
         OpType finishedType = state.activeMixed.type;
         state.activeMixed = null;
-        log.info("Finished {} mixer={}", properties.eventTypeName(finishedType), mixerId);
+        log.info("Operation finished alias={} mixer={}", operationAlias(finishedType), mixerId);
     }
 
     // ---------- Scoop ----------
@@ -535,7 +572,7 @@ public class EventNormalizer {
         ActiveOperation operation = new ActiveOperation(timeStr, folder);
         operation.externalId = createExternal(OpType.SCOOP, mixerId, beginZdt, folder);
         state.activeScoop = operation;
-        log.info("Begin scoop mixer={} externalId={}", mixerId, operation.externalId);
+        log.info("Operation started alias={} mixer={}", operationAlias(OpType.SCOOP), mixerId);
     }
 
     private void handleScoopFinish(MixerState state, int mixerId, ZonedDateTime finishZdt) {
@@ -547,7 +584,7 @@ public class EventNormalizer {
         ensureFinishNotBeforeBegin(state.activeScoop.beginTime, finishZdt);
         finishExternal(OpType.SCOOP, state.activeScoop.externalId, finishZdt);
         state.activeScoop = null;
-        log.info("Finished scoop mixer={}", mixerId);
+        log.info("Operation finished alias={} mixer={}", operationAlias(OpType.SCOOP), mixerId);
     }
 
     // ---------- Proba ----------
@@ -562,7 +599,7 @@ public class EventNormalizer {
         ActiveOperation operation = new ActiveOperation(timeStr, folder);
         operation.externalId = createExternal(OpType.PROBA, mixerId, beginZdt, folder);
         state.activeProba = operation;
-        log.info("Begin proba mixer={} externalId={}", mixerId, operation.externalId);
+        log.info("Operation started alias={} mixer={}", operationAlias(OpType.PROBA), mixerId);
     }
 
     private void handleProbaFinish(MixerState state, int mixerId, ZonedDateTime finishZdt) {
@@ -574,6 +611,10 @@ public class EventNormalizer {
         ensureFinishNotBeforeBegin(state.activeProba.beginTime, finishZdt);
         finishExternal(OpType.PROBA, state.activeProba.externalId, finishZdt);
         state.activeProba = null;
-        log.info("Finished proba mixer={}", mixerId);
+        log.info("Operation finished alias={} mixer={}", operationAlias(OpType.PROBA), mixerId);
+    }
+
+    private String operationAlias(OpType type) {
+        return auditAliasResolver.operation(type);
     }
 }

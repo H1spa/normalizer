@@ -1,14 +1,21 @@
 package com.mixer.normalizer.service;
 
+import com.mixer.normalizer.audit.AuditCodes;
+import com.mixer.normalizer.audit.service.AuditLogService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -33,6 +40,7 @@ public class EquipmentPoller {
     private final EventNormalizer normalizer;
     private final EquipmentStateHolder stateHolder;
     private final AsutpEquipmentClient asutpEquipmentClient;
+    private final AuditLogService auditLogService;
 
     /*
      * Этот компонент создается только если equipment.polling.enabled=true.
@@ -48,7 +56,8 @@ public class EquipmentPoller {
                            @Value("${equipment.polling.read-timeout-millis:30000}") int readTimeoutMillis,
                            EventNormalizer normalizer,
                            EquipmentStateHolder stateHolder,
-                           AsutpEquipmentClient asutpEquipmentClient) {
+                           AsutpEquipmentClient asutpEquipmentClient,
+                           AuditLogService auditLogService) {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         // Таймауты нужны, чтобы зависший внешний источник не остановил scheduler надолго.
         requestFactory.setConnectTimeout(connectTimeoutMillis);
@@ -62,26 +71,39 @@ public class EquipmentPoller {
         this.normalizer = normalizer;
         this.stateHolder = stateHolder;
         this.asutpEquipmentClient = asutpEquipmentClient;
+        this.auditLogService = auditLogService;
     }
 
     @Scheduled(fixedDelayString = "${equipment.polling.interval-seconds:120}000")
     public void pollEquipment() {
-        try {
-            // Если включена АСУ ТП, берем состояние оттуда; иначе используем старый polling URL.
-            Map<Integer, EquipmentStateHolder.EquipmentState> states = asutpEquipmentClient.isEnabled()
-                    ? pollAsutp()
-                    : pollLegacy();
+        try (AuditLogService.AuditScope scope = auditLogService.beginSystemScope(
+                AuditCodes.EVENT_POLL,
+                AuditCodes.OPERATION_UNKNOWN)) {
+            try {
+                // Если включена АСУ ТП, берем состояние оттуда; иначе используем старый polling URL.
+                Map<Integer, EquipmentStateHolder.EquipmentState> states = asutpEquipmentClient.isEnabled()
+                        ? pollAsutp()
+                        : pollLegacy();
 
-            applyStates(states);
-        } catch (Exception e) {
-            // Ошибка одного polling-цикла не должна останавливать приложение.
-            log.error("Failed to poll equipment", e);
+                applyStates(states);
+                auditLogService.log(
+                        AuditCodes.COMPONENT_POLLER,
+                        AuditCodes.ACTION_POLL_COMPLETED,
+                        AuditCodes.INFO,
+                        AuditCodes.SUCCESS);
+                scope.success();
+            } catch (Exception e) {
+                // Ошибка одного polling-цикла не должна останавливать приложение.
+                auditLogService.recordError(AuditCodes.COMPONENT_POLLER, e, null);
+                log.error("Polling failed alias={} error={}",
+                        AuditCodes.EVENT_POLL, e.getClass().getSimpleName());
+            }
         }
     }
 
     // Опрос через полноценный клиент АСУ ТП.
     private Map<Integer, EquipmentStateHolder.EquipmentState> pollAsutp() {
-        log.debug("Polling equipment from ASUTP");
+        log.debug("Polling external source alias={}", AuditCodes.ENDPOINT_EQUIPMENT_DATA);
         return asutpEquipmentClient.pollStates();
     }
 
@@ -92,7 +114,7 @@ public class EquipmentPoller {
             return Map.of();
         }
 
-        log.debug("Polling equipment from {}", pollingUrl);
+        log.debug("Polling external source alias={}", AuditCodes.ENDPOINT_EQUIPMENT_LEGACY);
 
         /*
          * Ожидаемый ответ legacy-источника:
@@ -101,7 +123,49 @@ public class EquipmentPoller {
          *   "456": { "gate": "CLOSED", "tilt": true }
          * }
          */
-        Map<?, ?> response = restTemplate.getForObject(pollingUrl, Map.class);
+        Instant startedAt = Instant.now();
+        Map<?, ?> response;
+        try {
+            auditLogService.log(
+                    AuditCodes.COMPONENT_EQUIPMENT,
+                    AuditCodes.ACTION_HTTP_REQUEST,
+                    AuditCodes.INFO,
+                    AuditCodes.STARTED);
+            ResponseEntity<Map> responseEntity = restTemplate.exchange(
+                    pollingUrl,
+                    HttpMethod.GET,
+                    null,
+                    Map.class);
+            response = responseEntity.getBody();
+            auditLogService.recordHttp(
+                    AuditCodes.COMPONENT_EQUIPMENT,
+                    AuditCodes.ENDPOINT_EQUIPMENT_LEGACY,
+                    "OUTBOUND",
+                    HttpMethod.GET.name(),
+                    responseEntity.getStatusCode().value(),
+                    null,
+                    response,
+                    null,
+                    startedAt,
+                    Instant.now());
+        } catch (RestClientException e) {
+            Integer status = e instanceof HttpStatusCodeException statusError
+                    ? statusError.getStatusCode().value()
+                    : null;
+            auditLogService.recordHttp(
+                    AuditCodes.COMPONENT_EQUIPMENT,
+                    AuditCodes.ENDPOINT_EQUIPMENT_LEGACY,
+                    "OUTBOUND",
+                    HttpMethod.GET.name(),
+                    status,
+                    null,
+                    null,
+                    null,
+                    startedAt,
+                    Instant.now());
+            auditLogService.recordError(AuditCodes.COMPONENT_EQUIPMENT, e, null);
+            throw e;
+        }
         if (response == null) {
             return Map.of();
         }
@@ -110,12 +174,12 @@ public class EquipmentPoller {
         for (Map.Entry<?, ?> entry : response.entrySet()) {
             Integer mixerId = parseMixerId(entry.getKey());
             if (mixerId == null) {
-                log.warn("Invalid mixer id in equipment state: {}", entry.getKey());
+                log.warn("Invalid mixer id in external state alias={}", AuditCodes.ENDPOINT_EQUIPMENT_LEGACY);
                 continue;
             }
 
             if (!(entry.getValue() instanceof Map<?, ?> data)) {
-                log.warn("Invalid equipment state for mixer {}: {}", mixerId, entry.getValue());
+                log.warn("Invalid external state alias={} mixer={}", AuditCodes.ENDPOINT_EQUIPMENT_LEGACY, mixerId);
                 continue;
             }
 

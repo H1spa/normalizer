@@ -1,5 +1,7 @@
 package com.mixer.normalizer.service;
 
+import com.mixer.normalizer.audit.AuditCodes;
+import com.mixer.normalizer.audit.service.AuditLogService;
 import com.mixer.normalizer.config.AsutpProperties;
 import com.mixer.normalizer.service.EquipmentStateHolder.EquipmentState;
 import org.slf4j.Logger;
@@ -12,9 +14,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
@@ -35,14 +40,17 @@ public class AsutpEquipmentClient {
     private final RestTemplate restTemplate;
     private final AsutpProperties properties;
     private final EquipmentStateHolder equipmentStateHolder;
+    private final AuditLogService auditLogService;
 
     // Токен защищен synchronized pollStates(); вне этого потока его читать/писать не нужно.
     private String dataToken;
 
     public AsutpEquipmentClient(AsutpProperties properties,
-                                EquipmentStateHolder equipmentStateHolder) {
+                                EquipmentStateHolder equipmentStateHolder,
+                                AuditLogService auditLogService) {
         this.properties = properties;
         this.equipmentStateHolder = equipmentStateHolder;
+        this.auditLogService = auditLogService;
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(properties.getConnectTimeoutMillis());
         requestFactory.setReadTimeout(properties.getReadTimeoutMillis());
@@ -63,7 +71,7 @@ public class AsutpEquipmentClient {
             return pollWithToken(ensureDataToken());
         } catch (HttpClientErrorException.Unauthorized e) {
             // АСУ ТП использует токен до 401; после этого повторяем всю цепочку авторизации.
-            log.info("ASUTP token expired, refreshing");
+            log.info("External token expired alias={}", AuditCodes.ENDPOINT_EQUIPMENT_DATA);
             dataToken = null;
             return pollWithToken(ensureDataToken());
         }
@@ -71,7 +79,14 @@ public class AsutpEquipmentClient {
 
     private Map<Integer, EquipmentState> pollWithToken(String token) {
         // url_3 принимает data_3 вида {"tagIds": ["..."]} и возвращает сырые значения тегов.
-        Object response = request(properties.getUrl3(), properties.getMethod3(), buildDataRequestBody(), token, false);
+        Object response = request(
+                properties.getUrl3(),
+                properties.getMethod3(),
+                buildDataRequestBody(),
+                token,
+                false,
+                AuditCodes.ENDPOINT_EQUIPMENT_DATA,
+                false);
         Map<String, Object> tagValues = extractTagValues(response);
         return toEquipmentStates(tagValues);
     }
@@ -93,10 +108,18 @@ public class AsutpEquipmentClient {
         putIfPresent(authBody, properties.getDomainNameField(), properties.getDomainName());
         putIfPresent(authBody, properties.getPasswordField(), properties.getPassword());
 
-        Object authResponse = request(properties.getUrl1(), properties.getMethod1(), authBody, null, false);
+        Object authResponse = request(
+                properties.getUrl1(),
+                properties.getMethod1(),
+                authBody,
+                null,
+                false,
+                AuditCodes.ENDPOINT_EQUIPMENT_AUTH,
+                true);
         String authToken = extractToken(authResponse);
         if (authToken == null || authToken.isBlank()) {
-            throw new IllegalStateException("ASUTP url_1 did not return token");
+            throw new IllegalStateException("External authorization returned no token alias="
+                    + AuditCodes.ENDPOINT_EQUIPMENT_AUTH);
         }
 
         // Шаг 2: url_2 получает token в Basic base64 Authorization и возвращает token для url_3.
@@ -105,10 +128,17 @@ public class AsutpEquipmentClient {
         putIfPresent(contextBody, properties.getDomainNameField(), properties.getDomainName());
         putIfPresent(contextBody, properties.getCastHouseIdField(), properties.getCastHouseId());
 
-        Object contextResponse = request(properties.getUrl2(), properties.getMethod2(), contextBody, authToken, true);
+        Object contextResponse = request(
+                properties.getUrl2(),
+                properties.getMethod2(),
+                contextBody,
+                authToken,
+                true,
+                AuditCodes.ENDPOINT_EQUIPMENT_CONTEXT,
+                true);
         String contextToken = extractToken(contextResponse);
 
-        log.info("ASUTP authorization completed");
+        log.info("External authorization completed alias={}", AuditCodes.ENDPOINT_EQUIPMENT_CONTEXT);
         return contextToken == null || contextToken.isBlank() ? authToken : contextToken;
     }
 
@@ -127,7 +157,13 @@ public class AsutpEquipmentClient {
         return body;
     }
 
-    private Object request(String url, String method, Map<String, Object> body, String token, boolean basicBase64Token) {
+    private Object request(String url,
+                           String method,
+                           Map<String, Object> body,
+                           String token,
+                           boolean basicBase64Token,
+                           String endpointAlias,
+                           boolean sensitiveResponse) {
         // Все запросы в АСУ ТП отправляются JSON-ом.
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -141,9 +177,50 @@ public class AsutpEquipmentClient {
             headers.set(tokenHeader(), basicBase64Token ? basicTokenHeaderValue(token) : token);
         }
 
+        HttpMethod httpMethod = httpMethod(method);
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
-        ResponseEntity<Object> response = restTemplate.exchange(url, httpMethod(method), request, Object.class);
-        return response.getBody();
+        Instant startedAt = Instant.now();
+        try {
+            auditLogService.log(
+                    AuditCodes.COMPONENT_EQUIPMENT,
+                    AuditCodes.ACTION_HTTP_REQUEST,
+                    AuditCodes.INFO,
+                    AuditCodes.STARTED);
+            ResponseEntity<Object> response = restTemplate.exchange(url, httpMethod, request, Object.class);
+            auditLogService.recordHttp(
+                    AuditCodes.COMPONENT_EQUIPMENT,
+                    endpointAlias,
+                    "OUTBOUND",
+                    httpMethod.name(),
+                    response.getStatusCode().value(),
+                    body,
+                    sensitiveResponse ? null : response.getBody(),
+                    null,
+                    startedAt,
+                    Instant.now());
+            return response.getBody();
+        } catch (RestClientException e) {
+            Integer status = null;
+            Object responseBody = null;
+            if (e instanceof HttpStatusCodeException statusError) {
+                status = statusError.getStatusCode().value();
+                responseBody = sensitiveResponse ? null : statusError.getResponseBodyAsString();
+            }
+            auditLogService.recordHttp(
+                    AuditCodes.COMPONENT_EQUIPMENT,
+                    endpointAlias,
+                    "OUTBOUND",
+                    httpMethod.name(),
+                    status,
+                    body,
+                    responseBody,
+                    null,
+                    startedAt,
+                    Instant.now());
+            auditLogService.recordError(AuditCodes.COMPONENT_EQUIPMENT, e, null);
+            log.error("External operation failed alias={} error={}", endpointAlias, e.getClass().getSimpleName());
+            throw e;
+        }
     }
 
     private HttpMethod httpMethod(String method) {
@@ -225,7 +302,7 @@ public class AsutpEquipmentClient {
         mixerIds.addAll(tiltTags.keySet());
 
         if (mixerIds.isEmpty()) {
-            log.warn("ASUTP polling is enabled, but ASUTP_GATE_TAGS and ASUTP_TILT_TAGS are empty");
+            log.warn("External polling configuration incomplete alias={}", AuditCodes.ENDPOINT_EQUIPMENT_DATA);
             return Map.of();
         }
 

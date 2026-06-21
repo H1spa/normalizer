@@ -1,5 +1,7 @@
 package com.mixer.normalizer.service;
 
+import com.mixer.normalizer.audit.AuditCodes;
+import com.mixer.normalizer.audit.service.AuditLogService;
 import com.mixer.normalizer.config.OuterAnswerProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,8 +13,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
@@ -30,6 +34,7 @@ public class OuterAnswerClient {
 
     private final RestTemplate restTemplate;
     private final OuterAnswerProperties properties;
+    private final AuditLogService auditLogService;
     /*
      * RestTemplate - обычный HTTP-клиент Spring.
      * Semaphore - счетчик одновременных запросов: он не дает normalizer завалить
@@ -37,8 +42,9 @@ public class OuterAnswerClient {
      */
     private final Semaphore semaphore;
 
-    public OuterAnswerClient(OuterAnswerProperties properties) {
+    public OuterAnswerClient(OuterAnswerProperties properties, AuditLogService auditLogService) {
         this.properties = properties;
+        this.auditLogService = auditLogService;
         // Fair semaphore=true выдает разрешения в порядке ожидания, без голодания потоков.
         this.semaphore = new Semaphore(properties.getMaxConcurrent(), true);
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
@@ -53,10 +59,21 @@ public class OuterAnswerClient {
     private static final String ID_FIELD = "id";
 
     public String createEvent(String service, int mixerId, String beginTime, String folder) {
+        Instant startedAt = Instant.now();
         // Любой запрос к outer-answer сначала проходит через лимит параллельности.
         acquire();
 
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put(MIXER_FIELD, mixerId);
+        body.put(DATE_FIELD, beginTime);
+        body.put(FOLDER_FIELD, folder);
+
         try {
+            auditLogService.log(
+                    AuditCodes.COMPONENT_EXTERNAL,
+                    AuditCodes.ACTION_HTTP_REQUEST,
+                    AuditCodes.INFO,
+                    AuditCodes.STARTED);
             /*
              * На begin создается новая внешняя запись.
              * Внешнему сервису нужны только три вещи:
@@ -66,11 +83,6 @@ public class OuterAnswerClient {
              * { "mixer": 123, "date": "...+0700", "imageFolderPath": "/images/path" }
              * Здесь нет type: тип операции уже выбран URL-ом service.
              */
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put(MIXER_FIELD, mixerId);
-            body.put(DATE_FIELD, beginTime);
-            body.put(FOLDER_FIELD, folder);
-
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
 
@@ -80,15 +92,28 @@ public class OuterAnswerClient {
             ResponseEntity<Object> response = restTemplate.exchange(url, HttpMethod.POST, entity, Object.class);
             String externalId = extractExternalId(response.getBody());
 
+            auditLogService.recordHttp(
+                    AuditCodes.COMPONENT_EXTERNAL,
+                    AuditCodes.ENDPOINT_EXTERNAL_CREATE,
+                    "OUTBOUND",
+                    HttpMethod.POST.name(),
+                    response.getStatusCode().value(),
+                    body,
+                    response.getBody(),
+                    externalId,
+                    startedAt,
+                    Instant.now());
             // Без id мы не сможем потом закрыть событие, поэтому это критическая ошибка.
             if (externalId == null || externalId.isBlank()) {
-                throw new IllegalStateException("outer-answer did not return id");
+                throw new IllegalStateException("External operation returned no id alias="
+                        + AuditCodes.ENDPOINT_EXTERNAL_CREATE);
             }
-
-            log.info("POST {} returned id={}", service, externalId);
+            log.info("External operation completed alias={}", AuditCodes.ENDPOINT_EXTERNAL_CREATE);
             return externalId;
         } catch (RestClientException e) {
-            log.error("Failed to POST {} to outer-answer", service, e);
+            recordHttpFailure(AuditCodes.ENDPOINT_EXTERNAL_CREATE, HttpMethod.POST, body, null, e, startedAt);
+            log.error("External operation failed alias={} error={}",
+                    AuditCodes.ENDPOINT_EXTERNAL_CREATE, e.getClass().getSimpleName());
             throw e;
         } finally {
             // acquire() успешно завершился до try, поэтому release соответствует одному разрешению.
@@ -97,28 +122,52 @@ public class OuterAnswerClient {
     }
 
     public void finishEvent(String service, String externalEventId, String finishTime) {
+        Instant startedAt = Instant.now();
         // Закрытие тоже ограничивается семафором, чтобы не перегрузить внешний сервис.
         acquire();
 
+        Map<String, String> body = Map.of(DATE_FIELD, finishTime);
         try {
+            auditLogService.log(
+                    AuditCodes.COMPONENT_EXTERNAL,
+                    AuditCodes.ACTION_HTTP_REQUEST,
+                    AuditCodes.INFO,
+                    AuditCodes.STARTED);
             /*
              * На finish мы не создаем новую запись, а дозаполняем уже открытую.
              * Поэтому в тело кладется только date завершения.
              * mixer, imageFolderPath и любые другие поля сюда не добавляются.
              */
-            Map<String, String> body = Map.of(DATE_FIELD, finishTime);
-
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
 
             HttpEntity<Map<String, String>> entity = new HttpEntity<>(body, headers);
 
             String url = properties.getFinishFullUrl(service, externalEventId);
-            restTemplate.exchange(url, HttpMethod.PUT, entity, Void.class);
+            ResponseEntity<Void> response = restTemplate.exchange(url, HttpMethod.PUT, entity, Void.class);
 
-            log.info("PUT {}/{} with date={}", service, externalEventId, finishTime);
+            auditLogService.recordHttp(
+                    AuditCodes.COMPONENT_EXTERNAL,
+                    AuditCodes.ENDPOINT_EXTERNAL_FINISH,
+                    "OUTBOUND",
+                    HttpMethod.PUT.name(),
+                    response.getStatusCode().value(),
+                    body,
+                    null,
+                    externalEventId,
+                    startedAt,
+                    Instant.now());
+            log.info("External operation completed alias={}", AuditCodes.ENDPOINT_EXTERNAL_FINISH);
         } catch (RestClientException e) {
-            log.error("Failed to PUT {}/{} to outer-answer", service, externalEventId, e);
+            recordHttpFailure(
+                    AuditCodes.ENDPOINT_EXTERNAL_FINISH,
+                    HttpMethod.PUT,
+                    body,
+                    externalEventId,
+                    e,
+                    startedAt);
+            log.error("External operation failed alias={} error={}",
+                    AuditCodes.ENDPOINT_EXTERNAL_FINISH, e.getClass().getSimpleName());
             throw e;
         } finally {
             // Всегда возвращаем разрешение семафора, даже если внешний запрос упал.
@@ -145,6 +194,32 @@ public class OuterAnswerClient {
             return String.valueOf(value);
         }
         return null;
+    }
+
+    private void recordHttpFailure(String endpointAlias,
+                                   HttpMethod method,
+                                   Object requestBody,
+                                   Object externalOperationId,
+                                   RestClientException error,
+                                   Instant startedAt) {
+        Integer status = null;
+        Object responseBody = null;
+        if (error instanceof HttpStatusCodeException statusError) {
+            status = statusError.getStatusCode().value();
+            responseBody = statusError.getResponseBodyAsString();
+        }
+        auditLogService.recordHttp(
+                AuditCodes.COMPONENT_EXTERNAL,
+                endpointAlias,
+                "OUTBOUND",
+                method.name(),
+                status,
+                requestBody,
+                responseBody,
+                externalOperationId,
+                startedAt,
+                Instant.now());
+        auditLogService.recordError(AuditCodes.COMPONENT_EXTERNAL, error, null);
     }
 
     // Достает значение из вложенной map по пути вроде "data.id".

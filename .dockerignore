@@ -1,0 +1,9 @@
+.git
+.idea
+.env
+.env.*
+!.env.example
+*.tar
+*.docx
+target/*
+!target/normalizer-*.jar
