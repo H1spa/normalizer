@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Отчеты</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            color: #222;
+            background: #fff;
+        }
+
+        main {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        h1 {
+            margin: 0 0 14px;
+            font-size: 22px;
+            font-weight: 600;
+        }
+
+        .panel {
+            border: 1px solid #d0d0d0;
+            padding: 12px;
+            margin-bottom: 12px;
+            background: #fafafa;
+        }
+
+        .filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: end;
+        }
+
+        label {
+            display: grid;
+            gap: 4px;
+            min-width: 130px;
+            color: #444;
+        }
+
+        label.report {
+            min-width: 260px;
+        }
+
+        input,
+        select,
+        button {
+            font: inherit;
+        }
+
+        input,
+        select {
+            height: 32px;
+            border: 1px solid #aaa;
+            padding: 0 6px;
+            background: #fff;
+            box-sizing: border-box;
+        }
+
+        button {
+            min-height: 32px;
+            border: 1px solid #888;
+            background: #eee;
+            padding: 0 12px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #e2e2e2;
+        }
+
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .status {
+            margin: 8px 0 10px;
+            color: #555;
+        }
+
+        .status.error {
+            color: #a40000;
+        }
+
+        .table-wrap {
+            overflow: auto;
+            border: 1px solid #d0d0d0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            background: #fff;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 6px;
+            text-align: left;
+            vertical-align: top;
+            white-space: nowrap;
+        }
+
+        th {
+            background: #f2f2f2;
+            font-weight: 600;
+        }
+
+        .empty {
+            padding: 14px;
+            border: 1px solid #d0d0d0;
+            color: #555;
+            background: #fff;
+        }
+
+        @media (max-width: 700px) {
+            main {
+                padding: 10px;
+            }
+
+            label,
+            label.report {
+                width: 100%;
+                min-width: 0;
+            }
+
+            button {
+                flex: 1 1 auto;
+            }
+        }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Отчеты</h1>
+
+    <section class="panel">
+        <div class="filters">
+            <label class="report">
+                Вид отчета
+                <select id="reportType"></select>
+            </label>
+            <label>
+                С
+                <input id="from" type="datetime-local">
+            </label>
+            <label>
+                По
+                <input id="to" type="datetime-local">
+            </label>
+            <label>
+                Миксер
+                <input id="mixerId" type="number" min="0">
+            </label>
+            <label>
+                Статус
+                <select id="statusFilter">
+                    <option value="">Все</option>
+                    <option value="STARTED">Запущен</option>
+                    <option value="SUCCESS">Успешно</option>
+                    <option value="FAILED">Ошибка</option>
+                </select>
+            </label>
+            <label>
+                Строк
+                <select id="limit">
+                    <option value="100">100</option>
+                    <option value="500" selected>500</option>
+                    <option value="1000">1000</option>
+                </select>
+            </label>
+        </div>
+
+        <div class="actions">
+            <button id="loadButton" type="button">Показать</button>
+            <button id="resetButton" type="button">Очистить</button>
+            <button id="csvButton" type="button">CSV</button>
+            <button id="jsonButton" type="button">JSON</button>
+            <button id="printButton" type="button">Печать</button>
+        </div>
+    </section>
+
+    <div id="status" class="status">Готово</div>
+    <div id="table"></div>
+</main>
+
+<script>
+    const REPORTS = [
+        ["overview", "Обзор"],
+        ["processes", "Процессы"],
+        ["log-entries", "Журнал"],
+        ["http-exchanges", "HTTP-обмены"],
+        ["errors", "Ошибки"],
+        ["endpoints", "Эндпоинты"],
+        ["components", "Компоненты"],
+        ["operations", "Операции"],
+        ["mixers", "Миксеры"],
+        ["external-services", "Внешние сервисы"],
+        ["timeline", "По часам"],
+        ["slow-requests", "Медленные запросы"]
+    ];
+
+    const COLUMN_TEXT = {
+        action: "Действие",
+        avg_duration_ms: "Среднее время, мс",
+        calls: "Вызовов",
+        component: "Компонент",
+        completed_at: "Завершено",
+        correlation_id: "ID связи",
+        created_at: "Создано",
+        direction: "Направление",
+        duration_ms: "Время, мс",
+        endpoint: "Эндпоинт",
+        error_class: "Класс ошибки",
+        error_message: "Сообщение ошибки",
+        errors: "Ошибок",
+        event_type: "Тип события",
+        failed: "Ошибок",
+        final_status: "Итог",
+        finished_at: "Завершено",
+        first_seen_at: "Первое событие",
+        has_request_payload: "Тело запроса",
+        has_response_payload: "Тело ответа",
+        hour: "Час",
+        http_exchanges: "HTTP-обменов",
+        http_method: "Метод",
+        http_status: "HTTP-статус",
+        last_call_at: "Последний вызов",
+        last_seen_at: "Последнее событие",
+        level: "Уровень",
+        log_entries: "Записей",
+        max_duration_ms: "Максимум, мс",
+        message: "Сообщение",
+        metric: "Показатель",
+        min_duration_ms: "Минимум, мс",
+        mixer_id: "Миксер",
+        open: "Открыто",
+        operation: "Операция",
+        processes: "Процессов",
+        service: "Сервис",
+        started_at: "Начато",
+        status: "Статус",
+        success: "Успешно",
+        total: "Всего",
+        value: "Значение"
+    };
+
+    const VALUE_TEXT = {
+        ERROR: "Ошибка",
+        FAILED: "Ошибка",
+        INFO: "Информация",
+        INBOUND: "Входящий",
+        OUTBOUND: "Исходящий",
+        STARTED: "Запущен",
+        SUCCESS: "Успешно",
+        WARN: "Предупреждение"
+    };
+
+    let currentReport = null;
+
+    const reportType = document.getElementById("reportType");
+    const table = document.getElementById("table");
+    const status = document.getElementById("status");
+
+    document.getElementById("loadButton").addEventListener("click", loadReport);
+    document.getElementById("resetButton").addEventListener("click", resetFilters);
+    document.getElementById("csvButton").addEventListener("click", exportCsv);
+    document.getElementById("jsonButton").addEventListener("click", exportJson);
+    document.getElementById("printButton").addEventListener("click", () => window.print());
+    reportType.addEventListener("change", loadReport);
+
+    fillReportTypes();
+    setDefaultDates();
+    loadReport();
+
+    function fillReportTypes() {
+        for (const [id, title] of REPORTS) {
+            const option = document.createElement("option");
+            option.value = id;
+            option.textContent = title;
+            reportType.appendChild(option);
+        }
+    }
+
+    async function loadReport() {
+        showStatus("Загрузка...");
+
+        try {
+            const params = new URLSearchParams();
+            addDate(params, "from", value("from"));
+            addDate(params, "to", value("to"));
+            addParam(params, "mixerId", value("mixerId"));
+            addParam(params, "status", value("statusFilter"));
+            addParam(params, "limit", value("limit"));
+
+            const response = await fetch(`/api/reports/${reportType.value}?${params.toString()}`);
+            const body = await response.json().catch(() => ({}));
+
+            if (!response.ok) {
+                throw new Error(toRussianError(body.message));
+            }
+
+            currentReport = body;
+            renderTable(body.columns || [], body.rows || []);
+            showStatus(`Строк: ${(body.rows || []).length}`);
+        } catch (error) {
+            currentReport = null;
+            table.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+            showStatus(error.message, true);
+        }
+    }
+
+    function renderTable(columns, rows) {
+        if (!columns.length || !rows.length) {
+            table.innerHTML = '<div class="empty">Нет данных</div>';
+            return;
+        }
+
+        let html = '<div class="table-wrap"><table><thead><tr>';
+        for (const column of columns) {
+            html += `<th>${escapeHtml(columnName(column))}</th>`;
+        }
+        html += "</tr></thead><tbody>";
+
+        for (const row of rows) {
+            html += "<tr>";
+            for (const column of columns) {
+                html += `<td>${escapeHtml(formatValue(row[column]))}</td>`;
+            }
+            html += "</tr>";
+        }
+
+        html += "</tbody></table></div>";
+        table.innerHTML = html;
+    }
+
+    function resetFilters() {
+        document.getElementById("mixerId").value = "";
+        document.getElementById("statusFilter").value = "";
+        document.getElementById("limit").value = "500";
+        setDefaultDates();
+        loadReport();
+    }
+
+    function setDefaultDates() {
+        const to = new Date();
+        const from = new Date(to);
+        from.setHours(from.getHours() - 24);
+        document.getElementById("from").value = toInputDate(from);
+        document.getElementById("to").value = toInputDate(to);
+    }
+
+    function addParam(params, name, inputValue) {
+        if (inputValue) {
+            params.set(name, inputValue);
+        }
+    }
+
+    function addDate(params, name, inputValue) {
+        if (inputValue) {
+            params.set(name, new Date(inputValue).toISOString());
+        }
+    }
+
+    function value(id) {
+        return document.getElementById(id).value.trim();
+    }
+
+    function toInputDate(date) {
+        const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+        return local.toISOString().slice(0, 16);
+    }
+
+    function columnName(column) {
+        return COLUMN_TEXT[column] || column.replaceAll("_", " ");
+    }
+
+    function formatValue(input) {
+        if (input === null || input === undefined || input === "") {
+            return "-";
+        }
+        if (typeof input === "boolean") {
+            return input ? "Да" : "Нет";
+        }
+        if (VALUE_TEXT[input]) {
+            return VALUE_TEXT[input];
+        }
+        if (typeof input === "string" && /^\d{4}-\d{2}-\d{2}T/.test(input)) {
+            return new Date(input).toLocaleString("ru-RU");
+        }
+        return String(input);
+    }
+
+    function showStatus(message, error = false) {
+        status.textContent = message;
+        status.className = error ? "status error" : "status";
+    }
+
+    function toRussianError(message) {
+        if (!message) {
+            return "Не удалось загрузить отчет";
+        }
+        if (message.includes("Audit database is unavailable")) {
+            return "База аудита пока недоступна";
+        }
+        if (message.includes("Invalid date filter")) {
+            return "Неверный период";
+        }
+        if (message.includes("Unknown report type")) {
+            return "Неизвестный отчет";
+        }
+        return message;
+    }
+
+    function exportCsv() {
+        if (!currentReport || !currentReport.rows || !currentReport.rows.length) {
+            return;
+        }
+
+        const columns = currentReport.columns;
+        const lines = [columns.map(column => csvCell(columnName(column))).join(",")];
+        for (const row of currentReport.rows) {
+            lines.push(columns.map(column => csvCell(formatValue(row[column]))).join(","));
+        }
+        download(`${reportType.value}.csv`, lines.join("\n"), "text/csv;charset=utf-8");
+    }
+
+    function exportJson() {
+        if (!currentReport) {
+            return;
+        }
+        download(`${reportType.value}.json`, JSON.stringify(currentReport, null, 2), "application/json;charset=utf-8");
+    }
+
+    function csvCell(input) {
+        return `"${String(input).replaceAll('"', '""')}"`;
+    }
+
+    function download(name, content, type) {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    function escapeHtml(input) {
+        return String(input)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+    }
+</script>
+</body>
+</html>

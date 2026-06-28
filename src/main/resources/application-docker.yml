@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/${POSTGRES_DB:normalizer_audit}
+    username: ${POSTGRES_USER:normalizer_user}
+    password: ${POSTGRES_PASSWORD:normalizer_password}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: true
+    locations: classpath:db/migration

@@ -84,7 +84,7 @@ public class AsutpEquipmentClient {
                 properties.getMethod3(),
                 buildDataRequestBody(),
                 token,
-                false,
+                properties.getDataTokenMode(),
                 AuditCodes.ENDPOINT_EQUIPMENT_DATA,
                 false);
         Map<String, Object> tagValues = extractTagValues(response);
@@ -113,7 +113,7 @@ public class AsutpEquipmentClient {
                 properties.getMethod1(),
                 authBody,
                 null,
-                false,
+                "raw",
                 AuditCodes.ENDPOINT_EQUIPMENT_AUTH,
                 true);
         String authToken = extractToken(authResponse);
@@ -122,7 +122,7 @@ public class AsutpEquipmentClient {
                     + AuditCodes.ENDPOINT_EQUIPMENT_AUTH);
         }
 
-        // Шаг 2: url_2 получает token в Basic base64 Authorization и возвращает token для url_3.
+        // Шаг 2: url_2 получает token в настроенном формате и возвращает token для url_3.
         Map<String, Object> contextBody = new LinkedHashMap<>();
         contextBody.putAll(properties.getContextBodyMap());
         putIfPresent(contextBody, properties.getDomainNameField(), properties.getDomainName());
@@ -133,7 +133,7 @@ public class AsutpEquipmentClient {
                 properties.getMethod2(),
                 contextBody,
                 authToken,
-                true,
+                properties.getContextTokenMode(),
                 AuditCodes.ENDPOINT_EQUIPMENT_CONTEXT,
                 true);
         String contextToken = extractToken(contextResponse);
@@ -161,7 +161,7 @@ public class AsutpEquipmentClient {
                            String method,
                            Map<String, Object> body,
                            String token,
-                           boolean basicBase64Token,
+                           String tokenMode,
                            String endpointAlias,
                            boolean sensitiveResponse) {
         // Все запросы в АСУ ТП отправляются JSON-ом.
@@ -169,12 +169,10 @@ public class AsutpEquipmentClient {
         headers.setContentType(MediaType.APPLICATION_JSON);
         if (token != null && !token.isBlank()) {
             /*
-             * Второй запрос использует первый token как одноразовый пропуск:
-             * кладем его в Authorization: Basic base64(token).
-             * Третий запрос работает уже с token, который вернул url_2,
-             * поэтому повторно Basic-кодировать его не нужно.
+             * Формат token отличается у реального API и тестовых моков,
+             * поэтому способ записи в заголовок вынесен в настройку.
              */
-            headers.set(tokenHeader(), basicBase64Token ? basicTokenHeaderValue(token) : token);
+            headers.set(tokenHeader(), tokenHeaderValue(token, tokenMode));
         }
 
         HttpMethod httpMethod = httpMethod(method);
@@ -238,6 +236,18 @@ public class AsutpEquipmentClient {
     private String basicTokenHeaderValue(String token) {
         // Basic-авторизация требует заголовок Authorization: Basic base64(token).
         return "Basic " + Base64.getEncoder().encodeToString(token.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String tokenHeaderValue(String token, String tokenMode) {
+        String mode = tokenMode == null || tokenMode.isBlank()
+                ? "raw"
+                : tokenMode.trim().toLowerCase();
+        return switch (mode) {
+            case "basic" -> basicTokenHeaderValue(token);
+            case "bearer" -> "Bearer " + token;
+            case "raw" -> token;
+            default -> throw new IllegalArgumentException("Unsupported ASUTP token mode: " + tokenMode);
+        };
     }
 
     private String extractToken(Object response) {

@@ -1,22 +1,34 @@
+name: normalizer
+
 services:
   postgres:
-    image: postgres:18
+    image: postgres:17-alpine
     container_name: normalizer-postgres
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    env_file:
+      - .env
     ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - pgdata:/var/lib/postgresql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 10s
+      retries: 30
+      start_period: 120s
+
+  adminer:
+    image: adminer:4.8.1
+    container_name: normalizer-adminer
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${ADMINER_PORT:-8081}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   normalizer:
     build:
@@ -24,34 +36,18 @@ services:
       dockerfile: dockerfile
     container_name: normalizer-app
     restart: unless-stopped
+    env_file:
+      - .env
     ports:
-      - "${SERVER_PORT:-8080}:8080"
-    environment:
-      SERVER_PORT: 8080
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
-      LOGGING_AUDIT_ENABLED: ${LOGGING_AUDIT_ENABLED:-true}
-      LOGGING_AUDIT_SAVE_REQUEST_BODY: ${LOGGING_AUDIT_SAVE_REQUEST_BODY:-false}
-      LOGGING_AUDIT_SAVE_RESPONSE_BODY: ${LOGGING_AUDIT_SAVE_RESPONSE_BODY:-false}
-      LOGGING_AUDIT_MASK_SECRETS: ${LOGGING_AUDIT_MASK_SECRETS:-true}
-      LOGGING_AUDIT_QUEUE_CAPACITY: ${LOGGING_AUDIT_QUEUE_CAPACITY:-10000}
-      LOGGING_AUDIT_WARNING_INTERVAL_SECONDS: ${LOGGING_AUDIT_WARNING_INTERVAL_SECONDS:-30}
-      OUTER_ANSWER_URL: ${OUTER_ANSWER_URL:-}
-      EQUIPMENT_POLLING_ENABLED: ${EQUIPMENT_POLLING_ENABLED:-true}
-      ASUTP_ENABLED: ${ASUTP_ENABLED:-true}
-      ASUTP_URL_1: ${ASUTP_URL_1:-}
-      ASUTP_URL_2: ${ASUTP_URL_2:-}
-      ASUTP_URL_3: ${ASUTP_URL_3:-}
-      ASUTP_DOMAIN_NAME: ${ASUTP_DOMAIN_NAME:-}
-      ASUTP_PASSWORD: ${ASUTP_PASSWORD:-}
-      ASUTP_CAST_HOUSE_ID: ${ASUTP_CAST_HOUSE_ID:-}
-      ASUTP_TAG_IDS: ${ASUTP_TAG_IDS:-}
-      ASUTP_GATE_TAGS: ${ASUTP_GATE_TAGS:-}
-      ASUTP_TILT_TAGS: ${ASUTP_TILT_TAGS:-}
+      - "${APP_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
 
 volumes:
-  pgdata:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${POSTGRES_DATA_PATH}

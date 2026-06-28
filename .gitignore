@@ -43,3 +43,7 @@ build/
 # Local archives
 normalizer.tar
 *.tar
+
+# Local Docker/PostgreSQL state
+.docker-config/
+pgdata/data/

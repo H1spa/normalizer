@@ -82,6 +82,8 @@ asutp:
   context-body: ${ASUTP_CONTEXT_BODY:}
   data-body: ${ASUTP_DATA_BODY:}
   token-header: ${ASUTP_TOKEN_HEADER:Authorization}
+  context-token-mode: ${ASUTP_CONTEXT_TOKEN_MODE:basic}
+  data-token-mode: ${ASUTP_DATA_TOKEN_MODE:raw}
   token-fields: ${ASUTP_TOKEN_FIELDS:token,data.token}
   tag-list-fields: ${ASUTP_TAG_LIST_FIELDS:data,items,result}
   tag-id-fields: ${ASUTP_TAG_ID_FIELDS:tagId,tg_id,tgId,id}

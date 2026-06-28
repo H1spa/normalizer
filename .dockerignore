@@ -3,7 +3,8 @@
 .env
 .env.*
 !.env.example
+.docker-config/
+pgdata/
 *.tar
 *.docx
-target/*
-!target/normalizer-*.jar
+target/

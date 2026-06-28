@@ -32,6 +32,8 @@ public class AsutpProperties {
     private String contextBody;
     private String dataBody;
     private String tokenHeader = "Authorization";
+    private String contextTokenMode = "basic";
+    private String dataTokenMode = "raw";
     private String tokenFields = "token,data.token";
     private String tagListFields = "data,items,result";
     private String tagIdFields = "tagId,tg_id,tgId,id";
@@ -203,6 +205,22 @@ public class AsutpProperties {
 
     public void setTokenHeader(String tokenHeader) {
         this.tokenHeader = tokenHeader;
+    }
+
+    public String getContextTokenMode() {
+        return contextTokenMode;
+    }
+
+    public void setContextTokenMode(String contextTokenMode) {
+        this.contextTokenMode = contextTokenMode;
+    }
+
+    public String getDataTokenMode() {
+        return dataTokenMode;
+    }
+
+    public void setDataTokenMode(String dataTokenMode) {
+        this.dataTokenMode = dataTokenMode;
     }
 
     public String getTokenFields() {
